@@ -1,9 +1,9 @@
 import React from 'react';
-import { View, Text, ScrollView, Dimensions, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { ChevronRight, FileText } from 'lucide-react-native'; // Icon එක සඳහා මෙය අවශ්‍ය වේ
 
-const AnalyticsScreen = () => {
-  // සරල Chart දත්ත
+const AnalyticsScreen = ({ navigation }) => {
   const weeklyTrend = [
     { day: "Mon", val: 40 }, { day: "Tue", val: 60 }, { day: "Wed", val: 50 },
     { day: "Thu", val: 70 }, { day: "Fri", val: 85 }, { day: "Sat", val: 55 }, { day: "Sun", val: 45 }
@@ -13,13 +13,11 @@ const AnalyticsScreen = () => {
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
         
-        {/* Analytics Header */}
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Analytics</Text>
           <Text style={styles.headerSubtitle}>Your mental health insights</Text>
         </View>
 
-        {/* 1. Summary Cards */}
         <View style={styles.statsRow}>
           <View style={styles.card}>
             <View style={styles.iconCircle}><Text style={{fontSize: 18}}>📉</Text></View>
@@ -35,17 +33,15 @@ const AnalyticsScreen = () => {
           </View>
         </View>
 
-        {/* 2. Weekly Stress Trend (Pure Component Line Chart Style) */}
+        {/* Weekly Stress Trend Chart */}
         <View style={styles.whiteCard}>
           <View style={{flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20}}>
             <Text style={styles.cardTitle}>Weekly Stress Trend</Text>
-            <TouchableOpacity><Text style={{color: '#6366F1', fontWeight: 'bold', fontSize: 12}}>Full Report</Text></TouchableOpacity>
           </View>
           
           <View style={styles.chartContainer}>
             {weeklyTrend.map((item, index) => (
               <View key={index} style={styles.chartBarWrapper}>
-                {/* මම මෙතන line chart එකක් වෙනුවට ලස්සන soft bars පාවිච්චි කළා error නොවෙන්න */}
                 <View style={[styles.chartBar, { height: item.val, backgroundColor: item.val > 70 ? '#818CF8' : '#C7D2FE' }]} />
                 <Text style={styles.chartDayText}>{item.day}</Text>
               </View>
@@ -53,7 +49,22 @@ const AnalyticsScreen = () => {
           </View>
         </View>
 
-        {/* 3. Sleep vs Stress Insight */}
+        {/* View Weekly Report Card (අලුතින් එක් කළ කොටස) */}
+        <TouchableOpacity 
+          style={styles.reportRedirectCard} 
+          onPress={() => navigation.navigate('WeeklyReport')}
+        >
+          <View style={styles.reportIconCircle}>
+             <FileText color="#6366F1" size={20} />
+          </View>
+          <View style={{ flex: 1, marginLeft: 15 }}>
+            <Text style={styles.reportRedirectTitle}>View Weekly Report</Text>
+            <Text style={styles.reportRedirectSub}>Get detailed insights and recommendations</Text>
+          </View>
+          <ChevronRight color="#CBD5E1" size={20} />
+        </TouchableOpacity>
+
+        {/* Insight Card */}
         <View style={styles.insightCard}>
           <View style={styles.insightIconCircle}><Text style={{fontSize: 18}}>💡</Text></View>
           <View style={{ flex: 1, marginLeft: 12 }}>
@@ -64,21 +75,21 @@ const AnalyticsScreen = () => {
           </View>
         </View>
 
-        {/* 4. Monthly Progress Card (Green) */}
+        {/* Progress Card */}
         <View style={styles.progressCard}>
           <View style={{flexDirection: 'row', justifyContent: 'space-between'}}>
-             <View>
+              <View>
                 <Text style={styles.progressLabel}>This Month's Progress</Text>
                 <Text style={styles.progressValue}>-18%</Text>
-             </View>
-             <View style={styles.progressIcon}><Text style={{fontSize: 20}}>📉</Text></View>
+              </View>
+              <View style={styles.progressIcon}><Text style={{fontSize: 20}}>📉</Text></View>
           </View>
           <Text style={styles.progressDescription}>
             Great job! Your stress levels have decreased this month.
           </Text>
         </View>
 
-        {/* 5. Top Stress Factors (Custom Horizontal Bars) */}
+        {/* Top Stress Factors */}
         <View style={styles.whiteCard}>
           <Text style={styles.cardTitle}>Top Stress Factors</Text>
           {[
@@ -98,7 +109,7 @@ const AnalyticsScreen = () => {
           ))}
         </View>
 
-        {/* 6. Pattern Detected Alert */}
+        {/* Pattern Detected Card */}
         <View style={[styles.whiteCard, {borderLeftWidth: 4, borderLeftColor: '#F87171'}]}>
           <View style={{flexDirection: 'row', alignItems: 'center'}}>
             <Text style={{fontSize: 18}}>⚠️</Text>
@@ -107,6 +118,9 @@ const AnalyticsScreen = () => {
           <Text style={styles.patternText}>
             Your stress levels tend to spike on Thursdays and Fridays. Consider scheduling relaxation activities.
           </Text>
+          <TouchableOpacity style={{marginTop: 10}} onPress={() => navigation.navigate('Relax')}>
+             <Text style={{color: '#6366F1', fontWeight: '600', fontSize: 13}}>Try Relaxation Exercises →</Text>
+          </TouchableOpacity>
         </View>
 
       </ScrollView>
@@ -126,32 +140,46 @@ const styles = StyleSheet.create({
   cardLabel: { fontSize: 12, color: '#94A3B8', fontWeight: 'bold' },
   cardValue: { fontSize: 22, fontWeight: 'bold', color: '#1E293B' },
   cardSubText: { fontSize: 10, color: '#22C55E', fontWeight: '700' },
-  
   whiteCard: { backgroundColor: '#FFF', padding: 20, borderRadius: 25, marginBottom: 15, elevation: 1 },
   cardTitle: { fontWeight: 'bold', fontSize: 16, color: '#1E293B' },
-  
-  // Weekly Chart Styles
   chartContainer: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', height: 120, marginTop: 10 },
   chartBarWrapper: { alignItems: 'center' },
   chartBar: { width: 14, borderRadius: 7 },
   chartDayText: { fontSize: 10, color: '#94A3B8', marginTop: 8, fontWeight: 'bold' },
-
   insightCard: { backgroundColor: '#FFF', padding: 15, borderRadius: 20, flexDirection: 'row', marginBottom: 15, elevation: 1 },
   insightIconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#FFFBEB', alignItems: 'center', justifyContent: 'center' },
   insightTitle: { fontWeight: 'bold', fontSize: 15 },
   insightDescription: { fontSize: 12, color: '#64748B', marginTop: 4 },
-  
   progressCard: { backgroundColor: '#4ADE80', padding: 20, borderRadius: 25, marginBottom: 15 },
   progressLabel: { color: '#FFF', fontSize: 14 },
   progressValue: { color: '#FFF', fontSize: 32, fontWeight: 'bold' },
   progressIcon: { backgroundColor: 'rgba(255,255,255,0.2)', padding: 10, borderRadius: 12 },
   progressDescription: { color: '#FFF', fontSize: 12, marginTop: 10, opacity: 0.9 },
-  
   factorLabel: { fontSize: 13, fontWeight: '600', color: '#475569' },
   progressBarBg: { height: 12, backgroundColor: '#F1F5F9', borderRadius: 6, overflow: 'hidden' },
   progressBarFill: { height: '100%', borderRadius: 6 },
+  patternText: { fontSize: 13, color: '#64748B', marginTop: 10, lineHeight: 18 },
   
-  patternText: { fontSize: 13, color: '#64748B', marginTop: 10, lineHeight: 18 }
+  // View Weekly Report Card Styles
+  reportRedirectCard: { 
+    backgroundColor: '#FFF', 
+    padding: 18, 
+    borderRadius: 25, 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    marginBottom: 15, 
+    elevation: 1 
+  },
+  reportIconCircle: { 
+    width: 45, 
+    height: 45, 
+    borderRadius: 15, 
+    backgroundColor: '#EEF2FF', 
+    alignItems: 'center', 
+    justifyContent: 'center' 
+  },
+  reportRedirectTitle: { fontWeight: 'bold', fontSize: 16, color: '#1E293B' },
+  reportRedirectSub: { fontSize: 12, color: '#64748B', marginTop: 2 },
 });
 
 export default AnalyticsScreen;

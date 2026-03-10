@@ -1,13 +1,17 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, Dimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
+
+const { width } = Dimensions.get('window');
 
 const MoodTrackingScreen = ({ navigation }) => {
   const [selectedMood, setSelectedMood] = useState('Okay');
   const [stressLevel, setStressLevel] = useState(5);
   const [sleepHours, setSleepHours] = useState('');
   const [stressFactor, setStressFactor] = useState('');
+  const [note, setNote] = useState('');
+  const [activities, setActivities] = useState([]);
 
   const moods = [
     { label: 'Great', emoji: '🤩' },
@@ -17,7 +21,21 @@ const MoodTrackingScreen = ({ navigation }) => {
     { label: 'Terrible', emoji: '😭' },
   ];
 
-  // දත්ත Save කිරීමේදී දැනට Alert එකක් පෙන්වමු
+  const activitiesList = [
+    { id: '1', label: 'Exercise', icon: '🏃' },
+    { id: '2', label: 'Meditation', icon: '🧘' },
+    { id: '3', label: 'Reading', icon: '📚' },
+    { id: '4', label: 'Music', icon: '🎧' },
+  ];
+
+  const toggleActivity = (id) => {
+    if (activities.includes(id)) {
+      setActivities(activities.filter(a => a !== id));
+    } else {
+      setActivities([...activities, id]);
+    }
+  };
+
   const handleSaveEntry = () => {
     if (!sleepHours) {
       Alert.alert("Missing Info", "Please enter your sleep hours.");
@@ -29,11 +47,14 @@ const MoodTrackingScreen = ({ navigation }) => {
       stress_level: stressLevel,
       stress_factor: stressFactor || 'None',
       sleep_hours: parseFloat(sleepHours),
+      activities: activities,
+      note: note,
       timestamp: new Date().toISOString()
     };
 
     console.log("Saving Mood Data:", moodData);
-    Alert.alert("Success", "Your mood entry has been saved locally!");
+    // මෙතනට පස්සේ අපි API එකට මේ data යවන කොටස හදමු
+    Alert.alert("Success", "Your mood entry has been saved successfully!");
     navigation.goBack();
   };
 
@@ -49,7 +70,7 @@ const MoodTrackingScreen = ({ navigation }) => {
         <Text style={styles.title}>Mood Tracking</Text>
         <Text style={styles.subtitle}>How are you feeling today?</Text>
 
-        {/* Select Your Mood Card */}
+        {/* Mood Card */}
         <View style={styles.whiteCard}>
           <Text style={styles.cardHeader}>Select Your Mood</Text>
           <View style={styles.moodRow}>
@@ -70,7 +91,7 @@ const MoodTrackingScreen = ({ navigation }) => {
           </View>
         </View>
 
-        {/* Stress Level Slider Card */}
+        {/* Stress Level Card */}
         <View style={styles.whiteCard}>
           <Text style={styles.cardHeader}>Stress Level: {stressLevel}/10</Text>
           <View style={styles.sliderContainer}>
@@ -90,7 +111,24 @@ const MoodTrackingScreen = ({ navigation }) => {
           </View>
         </View>
 
-        {/* Main Stress Factor Card */}
+        {/* Activities Card */}
+        <View style={styles.whiteCard}>
+          <Text style={styles.cardHeader}>What have you been doing?</Text>
+          <View style={styles.activityRow}>
+            {activitiesList.map((item) => (
+              <TouchableOpacity 
+                key={item.id} 
+                style={[styles.activityItem, activities.includes(item.id) && styles.selectedActivity]}
+                onPress={() => toggleActivity(item.id)}
+              >
+                <Text style={{fontSize: 22}}>{item.icon}</Text>
+                <Text style={styles.activityLabel}>{item.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        {/* Input Cards */}
         <View style={styles.whiteCard}>
           <Text style={styles.cardHeader}>Main Stress Factor</Text>
           <TextInput 
@@ -102,7 +140,6 @@ const MoodTrackingScreen = ({ navigation }) => {
           />
         </View>
 
-        {/* Sleep Hours Card */}
         <View style={styles.whiteCard}>
           <Text style={styles.cardHeader}>Sleep Hours (Last Night)</Text>
           <TextInput 
@@ -112,6 +149,18 @@ const MoodTrackingScreen = ({ navigation }) => {
             placeholderTextColor="#94A3B8"
             value={sleepHours}
             onChangeText={setSleepHours}
+          />
+        </View>
+
+        <View style={styles.whiteCard}>
+          <Text style={styles.cardHeader}>Write a note to yourself</Text>
+          <TextInput 
+            style={[styles.input, {height: 100, textAlignVertical: 'top'}]} 
+            placeholder="How was your day truly?" 
+            multiline
+            numberOfLines={4}
+            value={note}
+            onChangeText={setNote}
           />
         </View>
 
@@ -143,6 +192,10 @@ const styles = StyleSheet.create({
   sliderContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
   slider: { flex: 1, height: 40, marginHorizontal: 10 },
   limitText: { fontSize: 12, color: '#94A3B8', fontWeight: '500' },
+  activityRow: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap' },
+  activityItem: { alignItems: 'center', padding: 12, borderRadius: 18, borderWidth: 1, borderColor: '#F1F5F9', width: '22%' },
+  selectedActivity: { borderColor: '#6366F1', backgroundColor: '#EEF2FF' },
+  activityLabel: { fontSize: 10, color: '#64748B', marginTop: 5 },
   input: { backgroundColor: '#F8FAFC', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', color: '#1E293B', fontSize: 15 },
   saveBtn: { backgroundColor: '#C7D2FE', padding: 18, borderRadius: 18, alignItems: 'center', marginTop: 10, shadowColor: '#6366F1', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 5 },
   saveBtnText: { color: '#6366F1', fontWeight: 'bold', fontSize: 16 }
