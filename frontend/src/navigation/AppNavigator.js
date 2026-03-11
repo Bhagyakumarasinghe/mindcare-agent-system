@@ -17,12 +17,13 @@ import RelaxScreen from '../screens/RelaxScreen';
 import MoodTrackingScreen from '../screens/MoodTrackingScreen';
 import AssessmentScreen from '../screens/AssessmentScreen';
 
-// අලුතින් එක් කළ Screens
+// Sub-Screens imports
 import BreathingExercise from '../screens/BreathingExercise';
 import FocusTimer from '../screens/FocusTimer';
 import Journaling from '../screens/Journaling';
 import Meditation from '../screens/Meditation';
-import WeeklyReportScreen from '../screens/WeeklyReportScreen'; // අලුතින් එක් කළා
+import WeeklyReportScreen from '../screens/WeeklyReportScreen';
+import EditProfileScreen from '../screens/EditProfile'; // අලුතින් එක් කළා
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -81,6 +82,13 @@ export default function AppNavigator() {
       <Stack.Screen name="Journaling" component={Journaling} />
       <Stack.Screen name="Meditation" component={Meditation} />
       <Stack.Screen name="WeeklyReport" component={WeeklyReportScreen} /> 
+      
+      {/* Profile Management */}
+      <Stack.Screen 
+        name="EditProfile" 
+        component={EditProfileScreen} 
+        options={{ headerShown: true, title: 'Edit Profile' }} 
+      />
     </Stack.Navigator>
   );
 }

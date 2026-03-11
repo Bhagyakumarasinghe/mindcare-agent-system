@@ -1,21 +1,37 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Dimensions, ActivityIndicator } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { 
+  View, 
+  Text, 
+  StyleSheet, 
+  ScrollView, 
+  TouchableOpacity, 
+  ActivityIndicator, 
+  RefreshControl 
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native'; // මෙය අලුතින් එක් කළා
 import { getUserProfile } from '../api/authService';
 
 export default function HomeScreen({ navigation }) {
   const [userName, setUserName] = useState('User');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const weeklyTrend = [
     { day: "Mon", val: 40 }, { day: "Tue", val: 65 }, { day: "Wed", val: 50 },
     { day: "Thu", val: 80 }, { day: "Fri", val: 95 }, { day: "Sat", val: 60 }, { day: "Sun", val: 45 }
   ];
 
-  useEffect(() => {
-    fetchUserData();
-  }, []);
+  /**
+   * useFocusEffect භාවිතා කිරීමෙන් වෙනත් Screen එකක සිට 
+   * මෙම Screen එකට පැමිණෙන සෑම විටම fetchUserData() ක්‍රියාත්මක වේ.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      fetchUserData();
+    }, [])
+  );
 
   const fetchUserData = async () => {
     try {
@@ -24,6 +40,7 @@ export default function HomeScreen({ navigation }) {
         const response = await getUserProfile(token);
         if (response.status === 200) {
           const fullName = response.data.name; 
+          // සම්පූර්ණ නමෙන් මුල් නම පමණක් වෙන් කර ගැනීම
           const firstName = fullName ? fullName.split(' ')[0] : 'User';
           setUserName(firstName); 
         }
@@ -32,7 +49,13 @@ export default function HomeScreen({ navigation }) {
       console.error("Error fetching user profile:", error);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
+  };
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchUserData();
   };
 
   const handleNavigation = (screenName) => {
@@ -49,13 +72,21 @@ export default function HomeScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+      <ScrollView 
+        showsVerticalScrollIndicator={false} 
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6366F1" />
+        }
+      >
         
+        {/* Header */}
         <View style={styles.header}>
           <Text style={styles.welcomeText}>Hi, {userName} 👋</Text>
           <Text style={styles.subText}>How are you feeling today?</Text>
         </View>
 
+        {/* Mental Health Status Card */}
         <View style={styles.statusCard}>
           <View>
             <Text style={styles.statusLabel}>Mental Health Status</Text>
@@ -66,6 +97,7 @@ export default function HomeScreen({ navigation }) {
           </View>
         </View>
 
+        {/* AI Agent Chat Card */}
         <TouchableOpacity style={styles.agentCard} onPress={() => handleNavigation('Chat')}>
           <View style={styles.agentIconBg}>
             <Text style={{fontSize: 24}}>🤖</Text>
@@ -77,6 +109,7 @@ export default function HomeScreen({ navigation }) {
           <Text style={styles.chatBubbleIcon}>💬</Text>
         </TouchableOpacity>
 
+        {/* Stress Graph Card */}
         <View style={styles.graphCard}>
           <View style={styles.graphHeader}>
             <Text style={styles.sectionTitle}>Weekly Stress Overview</Text>
@@ -97,12 +130,12 @@ export default function HomeScreen({ navigation }) {
           </View>
         </View>
 
+        {/* Quick Access Grid */}
         <Text style={styles.gridHeader}>Quick Access</Text>
         <View style={styles.grid}>
           <QuickAccessCard icon="🌿" title="Mood Tracking" desc="Log your emotions" color="#F0FDF4" onPress={() => handleNavigation('MoodTracking')} />
           <QuickAccessCard icon="🌬️" title="Stress Relief" desc="Breathing & relaxation" color="#F0F9FF" onPress={() => handleNavigation('Relax')} />
           <QuickAccessCard icon="📊" title="Analytics" desc="View reports" color="#F5F3FF" onPress={() => handleNavigation('Analytics')} />
-          {/* මෙන්න මෙතන navigate වෙන්න හැදුවා */}
           <QuickAccessCard icon="❓" title="Assessment" desc="Take a quick test" color="#FFFBEB" onPress={() => handleNavigation('Assessment')} />
         </View>
       </ScrollView>
