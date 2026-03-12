@@ -1,15 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  TouchableOpacity, 
-  ScrollView, 
-  Switch, 
-  Alert, 
-  ActivityIndicator,
-  RefreshControl,
-  Image 
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, Switch, 
+  Alert, ActivityIndicator, RefreshControl, Image 
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -18,18 +10,11 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as ImagePicker from 'expo-image-picker';
 import { 
-  User, 
-  Settings, 
-  Bell, 
-  ShieldCheck, 
-  FileText, 
-  Trash2, 
-  Camera, 
-  ChevronRight,
-  LogOut
+  User, Settings, Bell, ShieldCheck, FileText, 
+  Trash2, Camera, ChevronRight, LogOut 
 } from 'lucide-react-native';
 
-// API Services
+// API Services සම්බන්ධ කිරීම
 import { 
   getUserProfile, 
   logoutUser, 
@@ -45,7 +30,7 @@ export default function ProfileScreen({ navigation }) {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [profileImage, setProfileImage] = useState(null);
 
-  // Sync data every time the screen comes into focus
+  // Screen එකට එන හැම වෙලාවකම data refresh කරන්න
   useFocusEffect(
     useCallback(() => {
       fetchUserData();
@@ -58,7 +43,7 @@ export default function ProfileScreen({ navigation }) {
       const savedImage = await AsyncStorage.getItem('user_profile_image');
       if (savedImage) setProfileImage(savedImage);
     } catch (e) {
-      console.error("Failed to load image", e);
+      console.error("Image loading error:", e);
     }
   };
 
@@ -96,16 +81,22 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchUserData();
+  };
+
+  // --- Handlers ---
+
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    
     if (status !== 'granted') {
-      Alert.alert('Permission Needed', 'MindCare needs permission to access your gallery to upload a photo.');
+      Alert.alert('Permission Needed', 'MindCare needs gallery access to update your profile photo.');
       return;
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'], // මෙතන තමයි deprecated warning එක ආපු තැන නිවැරදි කළේ
+      mediaTypes: ['images'],
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.7,
@@ -119,9 +110,54 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchUserData();
+  const toggleNotifications = async (value) => {
+    const previousState = notificationsEnabled;
+    setNotificationsEnabled(value);
+    try {
+      // authService එකේ updateNotificationSettings පාවිච්චි කිරීම
+      await updateNotificationSettings(value);
+    } catch (error) {
+      Alert.alert("Error", "Failed to update notification settings.");
+      setNotificationsEnabled(previousState);
+    }
+  };
+
+  const handleExportData = async () => {
+    setLoading(true);
+    try {
+      const response = await exportData();
+      const { title, user_details, summary, analysis_report, generated_at } = response.data;
+
+      const htmlContent = `
+        <html>
+          <body style="font-family: 'Helvetica'; padding: 30px; color: #1E293B;">
+            <div style="text-align: center; border-bottom: 2px solid #7D9CFF; padding-bottom: 10px;">
+              <h1 style="color: #7D9CFF; margin-bottom: 5px;">${title}</h1>
+              <p style="color: #64748B;">Generated on: ${generated_at || new Date().toLocaleDateString()}</p>
+            </div>
+            <div style="margin-top: 20px;">
+              <p><b>User Name:</b> ${user_details.name}</p>
+              <p><b>Email:</b> ${user_details.email}</p>
+            </div>
+            <div style="margin-top: 20px; background: #F8FAFC; padding: 15px; border-radius: 10px;">
+              <h3 style="color: #1E293B;">AI Mood Summary</h3>
+              <p>${summary}</p>
+            </div>
+            <div style="margin-top: 20px;">
+              <h3>Detailed Analysis</h3>
+              <p>${analysis_report || 'No detailed analysis records available.'}</p>
+            </div>
+          </body>
+        </html>
+      `;
+
+      const { uri } = await Print.printToFileAsync({ html: htmlContent });
+      await Sharing.shareAsync(uri);
+    } catch (error) {
+      Alert.alert("Export Failed", "Could not generate PDF report.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -137,6 +173,25 @@ export default function ProfileScreen({ navigation }) {
           } catch (e) {
             await AsyncStorage.removeItem('userToken');
             navigation.replace('Login');
+          }
+        }, 
+        style: 'destructive' 
+      }
+    ]);
+  };
+
+  const handleDeleteAccount = () => {
+    Alert.alert("Delete Account", "This action is permanent. All your data will be erased. Are you sure?", [
+      { text: "Cancel", style: "cancel" },
+      { 
+        text: "Delete", 
+        onPress: async () => {
+          try {
+            await deleteAccount();
+            await AsyncStorage.removeItem('userToken');
+            navigation.replace('Login');
+          } catch (error) {
+            Alert.alert("Error", "Could not delete account.");
           }
         }, 
         style: 'destructive' 
@@ -217,25 +272,33 @@ export default function ProfileScreen({ navigation }) {
 
         <Text style={styles.sectionTitle}>ACCOUNT MANAGEMENT</Text>
         <View style={styles.sectionCard}>
-          <MenuOption icon={User} title="Edit Profile" onPress={() => {}} />
+          <MenuOption 
+            icon={User} 
+            title="Edit Profile" 
+            onPress={() => navigation.navigate('EditProfile', { currentName: user?.name })} 
+          />
           <MenuOption icon={Bell} title="Notifications" showArrow={false}>
             <Switch 
               value={notificationsEnabled} 
-              onValueChange={setNotificationsEnabled}
+              onValueChange={toggleNotifications}
               trackColor={{ false: "#E2E8F0", true: "#7D9CFF" }}
               thumbColor={"#FFF"}
             />
           </MenuOption>
-          <MenuOption icon={ShieldCheck} title="Privacy Settings" onPress={() => {}} />
+          <MenuOption 
+            icon={ShieldCheck} 
+            title="Privacy Settings" 
+            onPress={() => Alert.alert("Privacy Info", "Your journal entries are encrypted and stored securely. MindCare ensures zero third-party data sharing.")} 
+          />
         </View>
 
         <Text style={styles.sectionTitle}>DATA & SUPPORT</Text>
         <View style={styles.sectionCard}>
-          <MenuOption icon={FileText} title="Export My Data" onPress={() => {}} />
+          <MenuOption icon={FileText} title="Export My Data" onPress={handleExportData} />
           <MenuOption icon={LogOut} title="Logout" color="#64748B" onPress={handleLogout} />
         </View>
 
-        <TouchableOpacity style={styles.deleteBtn} onPress={() => {}}>
+        <TouchableOpacity style={styles.deleteBtn} onPress={handleDeleteAccount}>
            <Trash2 size={18} color="#EF4444" style={{marginRight: 8}} />
            <Text style={styles.deleteText}>Delete Account</Text>
         </TouchableOpacity>
