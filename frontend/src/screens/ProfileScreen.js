@@ -8,11 +8,15 @@ import {
   Switch, 
   Alert, 
   ActivityIndicator,
-  RefreshControl 
+  RefreshControl,
+  Image 
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import * as ImagePicker from 'expo-image-picker';
 import { 
   User, 
   Settings, 
@@ -39,13 +43,24 @@ export default function ProfileScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [profileImage, setProfileImage] = useState(null);
 
   // Sync data every time the screen comes into focus
   useFocusEffect(
     useCallback(() => {
       fetchUserData();
+      loadStoredProfileImage();
     }, [])
   );
+
+  const loadStoredProfileImage = async () => {
+    try {
+      const savedImage = await AsyncStorage.getItem('user_profile_image');
+      if (savedImage) setProfileImage(savedImage);
+    } catch (e) {
+      console.error("Failed to load image", e);
+    }
+  };
 
   const fetchUserData = async () => {
     try {
@@ -62,12 +77,14 @@ export default function ProfileScreen({ navigation }) {
           name: userData.name,
           email: userData.email,
           avatar: initials,
-          stats: { days: '1', entries: '0', stress: '0.0' }
+          stats: { 
+            days: userData.days_active || '1', 
+            entries: userData.entries_count || '0', 
+            stress: userData.avg_stress || '0.0' 
+          }
         });
         
-        // Sync the toggle switch with the database value
         setNotificationsEnabled(userData.notifications_enabled);
-
       } else {
         navigation.replace('Login');
       }
@@ -79,44 +96,32 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
+  const pickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    
+    if (status !== 'granted') {
+      Alert.alert('Permission Needed', 'MindCare needs permission to access your gallery to upload a photo.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'], // මෙතන තමයි deprecated warning එක ආපු තැන නිවැරදි කළේ
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.7,
+    });
+
+    if (!result.canceled) {
+      const selectedUri = result.assets[0].uri;
+      setProfileImage(selectedUri);
+      await AsyncStorage.setItem('user_profile_image', selectedUri);
+      Alert.alert("Success", "Profile picture updated!");
+    }
+  };
+
   const onRefresh = () => {
     setRefreshing(true);
     fetchUserData();
-  };
-
-  // --- Handlers ---
-
-  const toggleNotifications = async (value) => {
-    setNotificationsEnabled(value);
-    try {
-      await updateNotificationSettings(value);
-      if (value) {
-        Alert.alert("Notifications Enabled", "You will now receive important updates from MindCare.");
-      } else {
-        Alert.alert("Notifications Disabled", "You have turned off notifications.");
-      }
-    } catch (error) {
-      Alert.alert("Error", "Failed to update notification settings.");
-      setNotificationsEnabled(!value); // Revert switch on error
-    }
-  };
-
-  const handleExportData = async () => {
-    setLoading(true);
-    try {
-      const response = await exportData();
-      if (response.status === 200) {
-        Alert.alert(
-          "Export Successful", 
-          "Your data report has been generated and sent to your email.",
-          [{ text: "OK" }]
-        );
-      }
-    } catch (error) {
-      Alert.alert("Export Failed", "We couldn't process your data export right now.");
-    } finally {
-      setLoading(false);
-    }
   };
 
   const handleLogout = async () => {
@@ -139,37 +144,7 @@ export default function ProfileScreen({ navigation }) {
     ]);
   };
 
-  const handleDeleteAccount = () => {
-    Alert.alert(
-      "Delete Account", 
-      "This action is permanent and cannot be undone. All your progress will be lost.", 
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Delete My Account", 
-          onPress: async () => {
-            try {
-              await deleteAccount();
-              await AsyncStorage.removeItem('userToken');
-              navigation.replace('Login');
-            } catch (error) {
-              Alert.alert("Error", "Could not delete account. Please try again later.");
-            }
-          }, 
-          style: 'destructive' 
-        }
-      ]
-    );
-  };
-
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#7D9CFF" />
-      </View>
-    );
-  }
-
+  // Helper Components
   const StatBox = ({ label, value }) => (
     <View style={styles.statBox}>
       <Text style={styles.statValue}>{value}</Text>
@@ -189,14 +164,20 @@ export default function ProfileScreen({ navigation }) {
     </TouchableOpacity>
   );
 
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#7D9CFF" />
+      </View>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView 
         showsVerticalScrollIndicator={false} 
         contentContainerStyle={styles.content}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#7D9CFF" />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#7D9CFF" />}
       >
         <View style={styles.headerRow}>
           <Text style={styles.headerText}>Profile</Text>
@@ -208,9 +189,13 @@ export default function ProfileScreen({ navigation }) {
         <View style={styles.profileCard}>
           <View style={styles.avatarContainer}>
             <View style={styles.avatar}>
-               <Text style={styles.avatarText}>{user?.avatar}</Text>
+              {profileImage ? (
+                <Image source={{ uri: profileImage }} style={styles.avatarImg} />
+              ) : (
+                <Text style={styles.avatarText}>{user?.avatar}</Text>
+              )}
             </View>
-            <TouchableOpacity style={styles.cameraIcon}>
+            <TouchableOpacity style={styles.cameraIcon} onPress={pickImage}>
               <Camera size={14} color="#FFF" />
             </TouchableOpacity>
           </View>
@@ -232,33 +217,25 @@ export default function ProfileScreen({ navigation }) {
 
         <Text style={styles.sectionTitle}>ACCOUNT MANAGEMENT</Text>
         <View style={styles.sectionCard}>
-          <MenuOption 
-            icon={User} 
-            title="Edit Profile" 
-            onPress={() => navigation.navigate('EditProfile')} 
-          />
+          <MenuOption icon={User} title="Edit Profile" onPress={() => {}} />
           <MenuOption icon={Bell} title="Notifications" showArrow={false}>
             <Switch 
               value={notificationsEnabled} 
-              onValueChange={toggleNotifications}
+              onValueChange={setNotificationsEnabled}
               trackColor={{ false: "#E2E8F0", true: "#7D9CFF" }}
               thumbColor={"#FFF"}
             />
           </MenuOption>
-          <MenuOption 
-            icon={ShieldCheck} 
-            title="Privacy Settings" 
-            onPress={() => Alert.alert("Privacy", "MindCare uses end-to-end encryption to secure your data.")}
-          />
+          <MenuOption icon={ShieldCheck} title="Privacy Settings" onPress={() => {}} />
         </View>
 
         <Text style={styles.sectionTitle}>DATA & SUPPORT</Text>
         <View style={styles.sectionCard}>
-          <MenuOption icon={FileText} title="Export My Data" onPress={handleExportData} />
+          <MenuOption icon={FileText} title="Export My Data" onPress={() => {}} />
           <MenuOption icon={LogOut} title="Logout" color="#64748B" onPress={handleLogout} />
         </View>
 
-        <TouchableOpacity style={styles.deleteBtn} onPress={handleDeleteAccount}>
+        <TouchableOpacity style={styles.deleteBtn} onPress={() => {}}>
            <Trash2 size={18} color="#EF4444" style={{marginRight: 8}} />
            <Text style={styles.deleteText}>Delete Account</Text>
         </TouchableOpacity>
@@ -278,7 +255,8 @@ const styles = StyleSheet.create({
   settingsBtn: { padding: 8, backgroundColor: '#FFF', borderRadius: 12, elevation: 1 },
   profileCard: { backgroundColor: '#FFF', padding: 20, borderRadius: 28, flexDirection: 'row', alignItems: 'center', elevation: 2, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10 },
   avatarContainer: { position: 'relative', marginRight: 20 },
-  avatar: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#7D9CFF', justifyContent: 'center', alignItems: 'center' },
+  avatar: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#7D9CFF', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  avatarImg: { width: '100%', height: '100%' },
   avatarText: { color: '#FFF', fontSize: 28, fontWeight: 'bold' },
   cameraIcon: { position: 'absolute', bottom: 0, right: 0, backgroundColor: '#1E293B', padding: 8, borderRadius: 15, borderWidth: 3, borderColor: '#FFF' },
   userInfo: { flex: 1 },
