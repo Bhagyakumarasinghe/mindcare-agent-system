@@ -1,112 +1,184 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+import os
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from app.db.mongo import db
 from app.routers.protected_routes import get_current_user
-from app.services.assessment_agent import get_next_question # Assessment Agent එක import කිරීම
 from bson import ObjectId
 from datetime import datetime
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-router = APIRouter(prefix="/user", tags=["User Profile & Assessment"])
+# Agents සහ Services import කිරීම
+from app.services.orchestrator import route_user_intent
+from app.services.assessment_agent import get_next_question
+from app.services.therapy_agent import get_therapy_response
+from app.db.neo4j import get_user_insights, save_mood_entry_to_graph # <-- අලුතින් save_mood_entry_to_graph එකතු කළා
+from app.services.analytics_agent import get_user_mental_health_summary 
+from app.schemas.user_schema import MoodEntryRequest # <-- අලුතින් MoodEntryRequest එකතු කළා
 
-# --- Schemas ---
+router = APIRouter(prefix="/user", tags=["User Profile & AI Chat"])
+
+# --- Pydantic Models ---
+class ChatRequest(BaseModel):
+    message: Optional[str] = "" 
+    history: Optional[List[Dict[str, str]]] = []
+
+class AssessmentRequest(BaseModel):
+    history: List[Dict[str, Any]]
 
 class ProfileUpdate(BaseModel):
     name: str
 
-class AssessmentRequest(BaseModel):
-    history: List[Dict[str, str]] = [] # [{"question": "...", "answer": "..."}]
+# --- 1. Export Data Endpoint ---
+@router.get("/export")
+async def export_user_data(current_user: dict = Depends(get_current_user)):
+    try:
+        user_id = str(current_user["id"])
+        analytics_data = get_user_mental_health_summary(user_id)
+        if not analytics_data:
+            analytics_data = {
+                "history": [], 
+                "avg_sleep": 0, 
+                "avg_stress": 0, 
+                "message": "No data recorded yet."
+            }
+        return {
+            "status": "success", 
+            "user_id": user_id, 
+            "export_date": datetime.now().strftime("%Y-%m-%d"), 
+            "data": analytics_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- Profile Endpoints ---
+# --- 2. User Analytics Endpoint ---
+@router.get("/analytics")
+async def get_user_analytics(current_user: dict = Depends(get_current_user)):
+    try:
+        user_id = str(current_user["id"])
+        analytics_data = get_user_mental_health_summary(user_id)
+        return {
+            "status": "success", 
+            "user_id": user_id, 
+            "generated_at": datetime.now().isoformat(), 
+            "data": analytics_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ✅ 1. Get logged user profile
+# --- 3. Profile Endpoints ---
 @router.get("/me")
 async def get_profile(current_user: dict = Depends(get_current_user)):
-    user = await db.users.find_one({"_id": ObjectId(current_user["id"])})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    return {
-        "id": str(user["_id"]),
-        "name": user["name"],
-        "email": user["email"],
-        "notifications_enabled": user.get("notifications_enabled", True)
-    }
+    try:
+        user = await db.users.find_one({"_id": ObjectId(current_user["id"])})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        insights = get_user_insights(current_user["id"])
+        
+        return {
+            "id": str(user["_id"]),
+            "name": user["name"],
+            "email": user["email"],
+            "days_active": user.get("days_active", 1),
+            "entries_count": user.get("entries_count", 0),
+            "insights": insights 
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ✅ 2. Update User Profile Name
+# --- 4. Update Profile ---
 @router.put("/update")
 async def update_profile(data: ProfileUpdate, current_user: dict = Depends(get_current_user)):
-    result = await db.users.update_one(
-        {"_id": ObjectId(current_user["id"])},
-        {"$set": {"name": data.name}}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
-        
-    return {"message": "Profile updated successfully", "name": data.name}
+    try:
+        user_id = ObjectId(current_user["id"])
+        result = await db.users.update_one(
+            {"_id": user_id}, 
+            {"$set": {"name": data.name.strip()}}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="User record not found")
+        return {
+            "status": "success", 
+            "message": "Profile updated successfully",
+            "updated_name": data.name
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
-# ✅ 3. Update Notifications Preference
-@router.put("/update-notifications")
-async def update_notifications(enabled: bool, current_user: dict = Depends(get_current_user)):
-    result = await db.users.update_one(
-        {"_id": ObjectId(current_user["id"])},
-        {"$set": {"notifications_enabled": enabled}}
-    )
-    return {"message": "Notification preference updated successfully"}
-
-# --- Adaptive Assessment Endpoint ---
-
-# ✅ 4. Get Next Assessment Question (Adaptive Agent)
-@router.post("/assessment/next-question")
-async def assessment_chat(
-    data: AssessmentRequest, 
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Frontend එකෙන් එවන history එක අනුව ඊළඟ ප්‍රශ්නය AI එකෙන් ලබා දෙයි.
-    AI එක Assessment එක අවසන් කළ විට ස්වයංක්‍රීයව Neo4j වෙත දත්ත යවයි.
-    """
-    # 1. දැනට ලොග් වී සිටින පරිශීලකයාගේ ID එක ලබා ගැනීම
-    user_id = current_user["id"] 
-    
-    # 2. get_next_question function එකට user_id සහ history ලබා දීම
-    # (දැන් මෙය arguments දෙකක් බලාපොරොත්තු වෙයි)
-    next_q = get_next_question(user_id, data.history)
-    
-    return {
-        "user_id": user_id,
-        "question": next_q
-    }
-
-# --- Other Profile Actions ---
-
-# ✅ 5. Export User Data
-@router.get("/export")
-async def export_data(current_user: dict = Depends(get_current_user)):
-    user = await db.users.find_one({"_id": ObjectId(current_user["id"])})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    return {
-        "title": "MindCare Personal Health Report",
-        "generated_at": datetime.now().strftime("%Y-%m-%d"),
-        "user_details": {
-            "name": user.get("name", "User"),
-            "email": user.get("email")
-        },
-        "summary": "Your stress level data and activity logs are being analyzed by MindCare AI."
-    }
-
-# ✅ 6. Logout User
+# --- 5. Logout Endpoint ---
 @router.post("/logout")
 async def logout(current_user: dict = Depends(get_current_user)):
-    return {"message": "Logged out successfully"}
+    return {"status": "success", "message": "Logged out successfully"}
 
-# ✅ 7. Delete Account
-@router.delete("/delete")
-async def delete_user(current_user: dict = Depends(get_current_user)):
-    result = await db.users.delete_one({"_id": ObjectId(current_user["id"])})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"message": "User account and all data deleted successfully"}
+# --- 6. Separate Assessment Endpoint ---
+@router.post("/assessment/next-question")
+async def assessment_handler(data: AssessmentRequest, current_user: dict = Depends(get_current_user)):
+    """
+    ප්‍රශ්න 5ක් අහන Adaptive Assessment එක සඳහා පමණක් වෙන්වූ Endpoint එක.
+    """
+    user_id = str(current_user["id"])
+    try:
+        # කෙලින්ම Assessment Agent එක call කිරීම
+        reply = get_next_question(user_id, data.history)
+        return {
+            "status": "success", 
+            "question": reply.get("question")
+        }
+    except Exception as e:
+        print(f"❌ Assessment API error: {e}")
+        raise HTTPException(status_code=500, detail="Assessment failed")
+
+# --- 7. Pure AI Chat Endpoint ---
+@router.post("/chat")
+async def ai_chat_handler(data: ChatRequest, current_user: dict = Depends(get_current_user)):
+    """
+    සාමාන්‍ය Therapy Chat එක සඳහා පමණක් පාවිච්චි වේ.
+    """
+    user_id = str(current_user["id"]) 
+    user_message = data.message or ""
+    
+    try:
+        # මෙතනින් Assessment logic එක ඉවත් කර Therapy Agent එකට පමණක් යොමු කෙරේ
+        reply = get_therapy_response(user_id, user_message)
+            
+        return {
+            "status": "success", 
+            "intent": "THERAPY", 
+            "reply": reply
+        }
+    except Exception as e:
+        print(f"❌ Chat Agent error: {e}")
+        raise HTTPException(status_code=500, detail="AI Chat failed")   
+
+# --- 8. NEW: Mood Tracking Endpoint ---
+@router.post("/mood-log")
+async def log_user_mood(data: MoodEntryRequest, current_user: dict = Depends(get_current_user)):
+    """ඇප් එකේ සිට එන දිනපතා මූඩ් සහ ස්ට්‍රෙස් දත්ත MongoDB සහ Neo4j වෙත සේව් කිරීම."""
+    try:
+        user_id = str(current_user["id"])
+        
+        # 1. MongoDB එකේ සම්පූර්ණ හිස්ට්‍රි එක ලොග් කිරීම
+        mood_log_entry = {
+            "user_id": user_id,
+            "timestamp": datetime.utcnow(),
+            "mood": data.mood,
+            "stress_level": data.stress_level,
+            "activities": data.activities,
+            "stress_factor": data.stress_factor,
+            "sleep_hours": data.sleep_hours,
+            "note": data.note
+        }
+        await db.mood_logs.insert_one(mood_log_entry)
+        
+        # 2. Neo4j Graph එක අප්ඩේට් කිරීම (Analytics සඳහා)
+        save_mood_entry_to_graph(
+            user_id=user_id,
+            mood=data.mood,
+            stress=data.stress_level,
+            sleep=data.sleep_hours
+        )
+        
+        return {"status": "success", "message": "Mood entry logged successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

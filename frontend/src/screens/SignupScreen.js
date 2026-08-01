@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { registerUser, sendOTP } from '../api/authService'; // sendOTP එකත් import කරන්න
+import { registerUser, sendOTP } from '../api/authService';
 
 export default function SignupScreen({ navigation }) {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false); // Loading state එකක් එකතු කළා
+  const [loading, setLoading] = useState(false);
 
   const handleSignup = async () => {
     // 1. Validation
@@ -22,7 +22,7 @@ export default function SignupScreen({ navigation }) {
       const regResponse = await registerUser(fullName, email, password);
       
       if (regResponse.status === 200 || regResponse.status === 201) {
-        // 3. Register සාර්ථක නම් OTP එකක් යවන්න (Backend: /auth/send-otp)
+        // 3. Register සාර්ථක නම් OTP එකක් යවන්න
         try {
           await sendOTP(email);
           Alert.alert("Success", "Account created! OTP has been sent to your email.");
@@ -33,7 +33,6 @@ export default function SignupScreen({ navigation }) {
         }
       }
     } catch (error) {
-      // Backend එකෙන් එන වැරදි පණිවිඩය පෙන්වීම
       const errorMessage = error.response?.data?.detail || "Registration failed";
       Alert.alert("Signup Failed", errorMessage);
     } finally {
@@ -43,7 +42,7 @@ export default function SignupScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <Text style={styles.title}>Create Account</Text>
         <Text style={styles.subtitle}>Join MindCare to start your journey</Text>
 
@@ -54,15 +53,18 @@ export default function SignupScreen({ navigation }) {
           value={fullName}
           onChangeText={setFullName} 
         />
+
+        {/* මෙතන Placeholder එක "Email Address" ලෙස වෙනස් කළා */}
         <TextInput 
           style={styles.input} 
-          placeholder="University Email" 
+          placeholder="Email Address" 
           placeholderTextColor="#9CA3AF"
           keyboardType="email-address"
           autoCapitalize="none"
           value={email}
           onChangeText={setEmail} 
         />
+
         <TextInput 
           style={styles.input} 
           placeholder="Password" 

@@ -1,9 +1,32 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Wind, Clock, BookOpen, Headphones, PlayCircle, Lightbulb } from 'lucide-react-native';
 
+// ⚠️ ඔයාගේ පරිගණකයේ IP address එක මෙතනට දාන්න (උදා: 192.168.1.5)
+const BASE_URL = 'http://10.152.23.156:8000'; 
+
 const RelaxScreen = ({ navigation }) => {
+  const [dailyTip, setDailyTip] = useState('Taking just 5 minutes for mindful breathing can significantly reduce stress.');
+  const [loadingTip, setLoadingTip] = useState(false);
+
+  useEffect(() => {
+    const fetchTip = async () => {
+      setLoadingTip(true);
+      try {
+        const response = await fetch(`${BASE_URL}/user/daily-tip`); // ඔයාගේ backend route එකට අනුව වෙනස් කරන්න
+        const data = await response.json();
+        if (data && data.tip) {
+          setDailyTip(data.tip);
+        }
+      } catch (error) {
+        console.log('Error fetching daily tip, using default:', error);
+      } finally {
+        setLoadingTip(false);
+      }
+    };
+    fetchTip();
+  }, []);
 
   const options = [
     { 
@@ -12,7 +35,7 @@ const RelaxScreen = ({ navigation }) => {
       desc: 'Calm your mind with guided breathing', 
       icon: <Wind size={24} color="#4ADE80" />, 
       bgColor: '#F0FDF4',
-      route: 'BreathingExercise' // Navigator එකේ නමට සමාන විය යුතුයි
+      route: 'BreathingExercise'
     },
     { 
       id: '2', 
@@ -53,7 +76,7 @@ const RelaxScreen = ({ navigation }) => {
             <TouchableOpacity 
               key={item.id} 
               style={styles.card}
-              onPress={() => navigation.navigate(item.route)} // මෙතනින් තමයි අදාළ screen එකට යන්නේ
+              onPress={() => navigation.navigate(item.route)}
             >
               <View style={[styles.iconBg, { backgroundColor: item.bgColor }]}>
                 {item.icon}
@@ -72,16 +95,17 @@ const RelaxScreen = ({ navigation }) => {
             <Lightbulb size={18} color="#FBBF24" fill="#FBBF24" />
             <Text style={styles.tipTitle}>Daily Tip</Text>
           </View>
-          <Text style={styles.tipText}>
-            Taking just 5 minutes for mindful breathing can significantly reduce stress and improve focus throughout your day.
-          </Text>
+          {loadingTip ? (
+            <ActivityIndicator color="#FFFFFF" size="small" style={{ alignSelf: 'flex-start', marginTop: 5 }} />
+          ) : (
+            <Text style={styles.tipText}>{dailyTip}</Text>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 };
 
-// Styles කලින් දුන් විදිහටම භාවිතා කරන්න...
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   scrollContent: { padding: 25, paddingBottom: 100 },

@@ -1,119 +1,99 @@
 import os
-import time
 import json
 from google import genai
-from google.genai import types
 from dotenv import load_dotenv
-
-# අපේ Neo4j සහ Encryption Utilities import කිරීම
 from app.db.neo4j import save_assessment_to_graph
+from app.utils.encryption import encrypt_data
 
 load_dotenv()
 
-# Gemini Client එක Initialize කිරීම
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# ඉතා වැදගත්: flash-lite-latest සඳහා v1beta පාවිච්චි කළ යුතුයි
+client = genai.Client(
+    api_key=os.getenv("GEMINI_API_KEY"),
+    http_options={'api_version': 'v1beta'}
+)
 
 def get_next_question(user_id, user_history):
     """
-    user_id: MongoDB එකෙන් එන User ID එක (Neo4j වලට දත්ත යැවීමට අවශ්‍යයි)
-    user_history: [{"question": "...", "answer": "..."}]
+    ප්‍රශ්න 5ක් සම්පූර්ණ වන තෙක් Adaptive Assessment එක පවත්වාගෙන යෑම.
     """
     
-    # 1. ආරම්භක ප්‍රශ්නය (History එකක් නැතිනම්)
-    if not user_history:
-        return "Hi! I'm your MindCare assistant. To start our check-in, how has your mood been over the last few days?"
+    # 1. ආරම්භක ප්‍රශ්නය (History එක හිස් නම්)
+    if not user_history or len(user_history) == 0:
+        return {"question": "Hi! I'm your MindCare assistant. To start our check-in, how has your mood been over the last few days?"}
 
-    asked_questions = [item['question'].lower() for item in user_history]
+    asked_questions = [str(item.get('question', '')).lower().strip() for item in user_history]
     turn_count = len(user_history)
-
-    # 2. භාවිතා කරන Model එක (ඔයාගේ AI Studio ලැයිස්තුවේ ඇති අලුත්ම එක)
-    # 404 error එක එන්නේ gemini-1.5-flash දැන් පරණ නිසා.
-    selected_model = "gemini-3.1-flash-lite-preview" 
-
-    # Prompt එක සැකසීම
-    prompt_text = f"""
-    Role: Mental Health Assessment Agent for university students in Sri Lanka.
-    Current Conversation History: {user_history}
     
-    Instructions:
-    - If total turns are {turn_count} and >= 5, return exactly: FINISH | [Score 1-10] | [Label]
-    - Otherwise, ask ONE empathetic, short follow-up question related to mental well-being.
-    - Avoid these previous topics: {asked_questions}
-    - Maximum response length: 15 words.
+    # ඔයාට අවශ්‍ය මොඩලය මෙතන නිවැරදිව තියෙනවා
+    SELECTED_MODEL = "gemini-flash-lite-latest"
+
+    print(f"\n--- [DEBUG ASSESSMENT START] ---")
+    print(f"Turn: {turn_count} | User: {user_id}")
+
+    # 2. ප්‍රශ්න 5ක් සම්පූර්ණ වූ පසු Scoring සිදු කිරීම
+    if turn_count >= 5:
+        print("DEBUG: Final step reached. Analyzing conversation for scoring...")
+        
+        analysis_prompt = f"""
+        Role: Student Mental Health Expert.
+        Task: Analyze the provided conversation and assign a stress score from 0 to 10.
+        Conversation: {json.dumps(user_history)}
+        Return ONLY valid JSON: 
+        {{"score": integer, "label": "Good/Moderate/High Stress", "summary": "brief summary"}}
+        """
+
+        try:
+            analysis_res = client.models.generate_content(
+                model=SELECTED_MODEL,
+                contents=analysis_prompt,
+                config={'response_mime_type': 'application/json'}
+            )
+            
+            analysis_result = json.loads(analysis_res.text.strip())
+            final_score = max(0, min(int(analysis_result.get("score", 5)), 10))
+            final_label = analysis_result.get("label", "Completed")
+            
+            # Encryption සහ Neo4j ගබඩා කිරීම
+            save_assessment_to_graph(user_id, final_score, final_label, encrypt_data(json.dumps(user_history)))
+            return {"question": f"FINISH | {final_score} | {final_label}"}
+
+        except Exception as err:
+            print(f"!!! ANALYSIS ERROR !!!: {err}")
+            save_assessment_to_graph(user_id, 5, "Completed", encrypt_data(json.dumps(user_history)))
+            return {"question": "FINISH | 5 | Assessment Completed"}
+
+    # 3. ඊළඟ ප්‍රශ්නය ලබා ගැනීමට AI කැඳවීම
+    prompt_text = f"""
+    Role: Student Mental Health AI. 
+    Ask ONE brief (max 10 words) follow-up question based on the user's last answer: "{user_history[-1].get('answer')}".
+    Constraint: Focus on academic workload, sleep, or social life. Do not repeat topics: {asked_questions}.
+    Return ONLY JSON: {{"question": "your_question"}}
     """
 
-    # 3. SMART RETRY LOGIC (Rate limits සහ Quota issues වලට)
-    max_retries = 2
-    response_text = ""
+    try:
+        print(f"DEBUG: Requesting next question from {SELECTED_MODEL}...")
+        response = client.models.generate_content(
+            model=SELECTED_MODEL,
+            contents=prompt_text,
+            config={
+                'response_mime_type': 'application/json',
+                'temperature': 0.7
+            }
+        )
+        
+        # AI එකෙන් එන දත්ත terminal එකේ print කරලා බලන්න
+        print(f"DEBUG AI RESPONSE: {response.text}")
+        
+        return json.loads(response.text.strip())
 
-    for attempt in range(max_retries):
-        try:
-            # Request එක යවන්න කලින් පොඩි විවේකයක් (Rate limit protection)
-            time.sleep(1) 
-
-            response = client.models.generate_content(
-                model=selected_model,
-                contents=prompt_text
-            )
-
-            if response and hasattr(response, "text") and response.text:
-                response_text = response.text.strip()
-                break 
-            
-        except Exception as e:
-            error_str = str(e).lower()
-            print(f"Attempt {attempt + 1} failed with {selected_model}: {e}")
-
-            # 404 Error එකක් ආවොත් model alias එක වෙනස් කරමු
-            if "404" in error_str:
-                selected_model = "gemini-flash-lite-latest"
-                continue
-
-            # 429 Quota Error එකක් ආවොත් තත්පර 5ක් ඉමු
-            if "429" in error_str and attempt < max_retries - 1:
-                print("Quota exceeded. Retrying in 5 seconds...")
-                time.sleep(5)
-                continue
-            break
-
-    # --- NEO4J INTEGRATION (The Final Step) ---
-    # AI එක Assessment එක ඉවර කළා නම්, ඒ දත්ත Neo4j වලට සේව් කරමු
-    if response_text and "FINISH" in response_text:
-        try:
-            # AI එවූ Format එක: FINISH | 8 | Highly Stressed
-            parts = response_text.split("|")
-            if len(parts) >= 3:
-                final_score = int(parts[1].strip())
-                final_label = parts[2].strip()
-
-                # Neo4j වෙත ආරක්ෂිතව (Encrypted) දත්ත යැවීම
-                save_assessment_to_graph(
-                    user_id=user_id, 
-                    score=final_score, 
-                    label=final_label, 
-                    history=user_history
-                )
-            
-            return response_text # FINISH | Score | Label
-
-        except Exception as ex:
-            print(f"Failed to sync assessment to Neo4j: {ex}")
-
-    # AI එකෙන් සාමාන්‍ය ප්‍රශ්නයක් ආවා නම් ඒක යවන්න
-    if response_text:
-        return response_text
-
-    # --- FALLBACK POOL (AI වැඩ නැතිනම් පමණක්) ---
-    print("All AI attempts failed. Using static fallback.")
-    fallback_pool = [
-        "How has your sleep quality been over the past few nights?",
-        "Are you feeling overwhelmed by your current academic workload?",
-        "Have you been able to spend time with friends or family lately?",
-        "How is your energy level usually by the end of the day?"
-    ]
-    
-    for q in fallback_pool:
-        if not any(q.lower()[:15] in asked for asked in asked_questions):
-            return q
-            
-    return "Thank you for sharing. Is there anything else you'd like to tell me today?"
+    except Exception as e:
+        print(f"!!! AI ERROR !!!: {str(e)}")
+        # Fallback Mechanism: AI එකේ මොනවා හරි අවුලක් ආවොත් මේ ප්‍රශ්න ටික පිළිවෙලට අහනවා
+        fallbacks = [
+            "How has your sleep quality been over the past few nights?",
+            "Are you feeling overwhelmed by your academic workload?",
+            "Have you been able to spend time with friends or family lately?",
+            "How is your energy level usually by the end of the day?"
+        ]
+        return {"question": fallbacks[turn_count-1] if turn_count <= len(fallbacks) else "Tell me more about how you feel."}

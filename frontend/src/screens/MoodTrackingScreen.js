@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, Dimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
+import AsyncStorage from '@react-native-async-storage/async-storage'; // <-- AsyncStorage import කළා
 
 const { width } = Dimensions.get('window');
 
@@ -36,26 +37,55 @@ const MoodTrackingScreen = ({ navigation }) => {
     }
   };
 
-  const handleSaveEntry = () => {
+  const handleSaveEntry = async () => {
     if (!sleepHours) {
       Alert.alert("Missing Info", "Please enter your sleep hours.");
       return;
     }
 
-    const moodData = {
-      mood: selectedMood,
-      stress_level: stressLevel,
-      stress_factor: stressFactor || 'None',
-      sleep_hours: parseFloat(sleepHours),
-      activities: activities,
-      note: note,
-      timestamp: new Date().toISOString()
-    };
+    try {
+      const token = await AsyncStorage.getItem('userToken');
+      const BACKEND_URL = "http://10.152.23.156:8000"; // ඔයාගේ වත්මන් IP එකට අනුව යාවත්කාලීන කළා 
 
-    console.log("Saving Mood Data:", moodData);
-    // මෙතනට පස්සේ අපි API එකට මේ data යවන කොටස හදමු
-    Alert.alert("Success", "Your mood entry has been saved successfully!");
-    navigation.goBack();
+      // ID වෙනුවට බැකෙන්ඩ් එක බලාපොරොත්තු වන Activity Labels (e.g. ["Exercise", "Music"]) ලබා ගැනීම
+      const selectedActivityLabels = activities.map(id => {
+        const act = activitiesList.find(a => a.id === id);
+        return act ? act.label : '';
+      }).filter(label => label !== '');
+
+      const payload = {
+        mood: selectedMood,
+        stress_level: parseInt(stressLevel),
+        activities: selectedActivityLabels,
+        stress_factor: stressFactor || 'None',
+        sleep_hours: parseFloat(sleepHours) || 0,
+        note: note
+      };
+
+      console.log("Sending Mood Data:", payload);
+
+      const response = await fetch(`${BACKEND_URL}/user/mood-log`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+      
+      if (response.ok) {
+        Alert.alert("Success", "Your mood entry has been saved successfully!");
+        // Navigation Stack එකේ Home හෝ Dashboard එක තිබේ නම් Navigate කරන්න, නැතහොත් goBack() කරන්න
+        navigation.goBack();
+      } else {
+        Alert.alert("Error", result.detail || "Something went wrong");
+      }
+    } catch (error) {
+      console.error("❌ Mood Log Submit Error:", error);
+      Alert.alert("Connection Error", "Could not connect to the server");
+    }
   };
 
   return (
@@ -98,7 +128,7 @@ const MoodTrackingScreen = ({ navigation }) => {
             <Text style={styles.limitText}>Low</Text>
             <Slider
               style={styles.slider}
-              minimumValue={0}
+              minimumValue={1}
               maximumValue={10}
               step={1}
               value={stressLevel}

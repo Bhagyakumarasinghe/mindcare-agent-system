@@ -1,21 +1,36 @@
-from cryptography.fernet import Fernet
 import os
+from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
-# .env එකේ ඇති ENCRYPTION_KEY එක ලබා ගැනීම
-key = os.getenv("ENCRYPTION_KEY")
-cipher_suite = Fernet(key.encode()) if key else None
+# Get encryption key from .env file
+# Ensure ENCRYPTION_KEY is a valid Fernet key (32 url-safe base64-encoded bytes)
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+
+if ENCRYPTION_KEY:
+    cipher_suite = Fernet(ENCRYPTION_KEY.encode())
+else:
+    cipher_suite = None
+    print("⚠️ Warning: ENCRYPTION_KEY not found in .env file!")
 
 def encrypt_data(data: str) -> str:
-    """දත්ත කියවන්න බැරි string එකක් බවට පත් කරයි."""
+    """
+    Encrypts a plain text string into a cipher text.
+    """
     if not data or not cipher_suite:
         return data
     return cipher_suite.encrypt(data.encode()).decode()
 
 def decrypt_data(encrypted_data: str) -> str:
-    """Encrypt කළ දත්ත නැවත කියවිය හැකි string එකක් බවට පත් කරයි."""
+    """
+    Decrypts a cipher text back into plain text.
+    """
     if not encrypted_data or not cipher_suite:
         return encrypted_data
-    return cipher_suite.decrypt(encrypted_data.encode()).decode()
+    try:
+        return cipher_suite.decrypt(encrypted_data.encode()).decode()
+    except Exception as e:
+        print(f"❌ Decryption failed: {e}")
+        return encrypted_data

@@ -1,119 +1,40 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Backend එක run වන නිවැරදි IP එක (ඔයාගේ IPv4 එක)
-const API_URL = 'http://10.32.239.156:8000'; 
+const API_URL = 'http://10.152.23.156:8000'; 
 
 const authClient = axios.create({
   baseURL: API_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
 });
 
-/**
- * 1. Register User
- */
-export const registerUser = async (fullName, email, password) => {
-  return await authClient.post('/auth/register', {
-    name: fullName, 
-    email: email,
-    password: password,
-  });
-};
+authClient.interceptors.request.use(
+  async (config) => {
+    const token = await AsyncStorage.getItem('userToken');
+    if (token) { config.headers.Authorization = `Bearer ${token}`; }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
-/**
- * 2. Send OTP
- */
-export const sendOTP = async (email) => {
-  return await authClient.post(`/auth/send-otp?email=${encodeURIComponent(email)}`);
-};
+// --- AUTH FUNCTIONS ---
+export const loginUser = (email, password) => authClient.post('/auth/login', { email, password });
+export const registerUser = (fullName, email, password) => authClient.post('/auth/register', { name: fullName, email, password });
 
-/**
- * 3. Verify OTP
+/** * ✅ OTP FUNCTIONS (අලුතින් එක්කළා)
+ * Backend එකේ Body(...) බලාපොරොත්තු වන නිසා JSON Object එකක් ලෙස යවයි.
  */
-export const verifyOTP = async (email, otpCode) => {
-  return await authClient.post(`/auth/verify-otp?email=${encodeURIComponent(email)}&otp=${otpCode}`);
-};
+export const verifyOTP = (email, otp) => authClient.post('/auth/verify-otp', { email, otp });
+export const sendOTP = (email) => authClient.post('/auth/send-otp', { email });
 
-/**
- * 4. Login User
- */
-export const loginUser = async (email, password) => {
-  return await authClient.post('/auth/login', {
-    email: email, 
-    password: password,
-  });
-};
+// --- PROFILE & AI FUNCTIONS ---
+export const getUserProfile = () => authClient.get('/user/me');
+export const updateProfile = (updatedData) => authClient.put('/user/update', updatedData);
+export const getUserAnalytics = () => authClient.get('/user/analytics');
+export const exportData = () => authClient.get('/user/export');
+export const logoutUser = () => authClient.post('/user/logout');
 
-/**
- * 5. Get User Profile
- */
-export const getUserProfile = async (token) => {
-  return await authClient.get('/user/me', {
-    headers: {
-      Authorization: `Bearer ${token}`, 
-    },
-  });
-};
+export const getNextQuestion = (history = []) => authClient.post('/user/assessment/next-question', { history });
+export const sendChatMessage = (message, history = []) => authClient.post('/user/chat', { message, history });
 
-/**
- * 6. Update User Profile
- */
-export const updateProfile = async (updatedData) => {
-  const token = await AsyncStorage.getItem('userToken');
-  return await authClient.put('/user/update', updatedData, {
-    headers: {
-      Authorization: `Bearer ${token}`, 
-    },
-  });
-};
-
-/**
- * 7. Update Notification Preference (අලුතින් එක් කළා)
- * Switch එක ක්‍රියාත්මක කරන විට Database එක update කිරීමට මෙය භාවිතා වේ.
- */
-export const updateNotificationSettings = async (enabled) => {
-  const token = await AsyncStorage.getItem('userToken');
-  return await authClient.put(`/user/update-notifications?enabled=${enabled}`, {}, {
-    headers: {
-      Authorization: `Bearer ${token}`, 
-    },
-  });
-};
-
-/**
- * 8. Export My Data
- */
-export const exportData = async () => {
-  const token = await AsyncStorage.getItem('userToken');
-  return await authClient.get('/user/export', {
-    headers: {
-      Authorization: `Bearer ${token}`, 
-    },
-  });
-};
-
-/**
- * 9. Logout User
- */
-export const logoutUser = async () => {
-  const token = await AsyncStorage.getItem('userToken');
-  return await authClient.post('/user/logout', {}, {
-    headers: {
-      Authorization: `Bearer ${token}`, 
-    },
-  });
-};
-
-/**
- * 10. Delete Account
- */
-export const deleteAccount = async () => {
-  const token = await AsyncStorage.getItem('userToken');
-  return await authClient.delete('/user/delete', {
-    headers: {
-      Authorization: `Bearer ${token}`, 
-    },
-  });
-};
+export default authClient;
