@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput, Alert, Dimensions, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Slider from '@react-native-community/slider';
-import AsyncStorage from '@react-native-async-storage/async-storage'; // <-- AsyncStorage import කළා
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { ArrowLeft, Settings, HeartPulse } from 'lucide-react-native';
+import { logMoodEntry } from '../api/authService';
 
 const { width } = Dimensions.get('window');
 
@@ -13,6 +15,7 @@ const MoodTrackingScreen = ({ navigation }) => {
   const [stressFactor, setStressFactor] = useState('');
   const [note, setNote] = useState('');
   const [activities, setActivities] = useState([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const moods = [
     { label: 'Great', emoji: '🤩' },
@@ -43,60 +46,96 @@ const MoodTrackingScreen = ({ navigation }) => {
       return;
     }
 
+    setIsSubmitting(true);
     try {
-      const token = await AsyncStorage.getItem('userToken');
-      const BACKEND_URL = "http://10.152.23.156:8000"; // ඔයාගේ වත්මන් IP එකට අනුව යාවත්කාලීන කළා 
-
-      // ID වෙනුවට බැකෙන්ඩ් එක බලාපොරොත්තු වන Activity Labels (e.g. ["Exercise", "Music"]) ලබා ගැනීම
+      // Map selected activity IDs to descriptive labels
       const selectedActivityLabels = activities.map(id => {
         const act = activitiesList.find(a => a.id === id);
         return act ? act.label : '';
       }).filter(label => label !== '');
 
+      // Payload strictly conforming to requirements:
+      // mood, stress_score, activities, sleep_hours, stress_factor, journal_note
       const payload = {
         mood: selectedMood,
-        stress_level: parseInt(stressLevel),
+        stress_score: parseInt(stressLevel),
+        stress_level: parseInt(stressLevel), // Backwards compatibility
         activities: selectedActivityLabels,
         stress_factor: stressFactor || 'None',
         sleep_hours: parseFloat(sleepHours) || 0,
-        note: note
+        journal_note: note,
+        note: note // Backwards compatibility
       };
 
-      console.log("Sending Mood Data:", payload);
+      console.log("Submitting Mood Entry Payload:", payload);
 
-      const response = await fetch(`${BACKEND_URL}/user/mood-log`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
+      let saved = false;
+      try {
+        const res = await logMoodEntry(payload);
+        if (res && (res.status === 200 || res.status === 201 || res.data?.status === 'success')) {
+          saved = true;
+        }
+      } catch (serviceErr) {
+        console.log("authService call failed, trying direct endpoint with token:", serviceErr.message || serviceErr);
+        const token = await AsyncStorage.getItem('userToken');
+        const BACKEND_URL = "http://10.234.214.156:8000";
+        const response = await fetch(`${BACKEND_URL}/user/mood-log`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify(payload)
+        });
+        if (response.ok) {
+          saved = true;
+        } else {
+          const result = await response.json().catch(() => ({}));
+          throw new Error(result.detail || "Server error while saving mood entry.");
+        }
+      }
 
-      const result = await response.json();
-      
-      if (response.ok) {
-        Alert.alert("Success", "Your mood entry has been saved successfully!");
-        // Navigation Stack එකේ Home හෝ Dashboard එක තිබේ නම් Navigate කරන්න, නැතහොත් goBack() කරන්න
-        navigation.goBack();
-      } else {
-        Alert.alert("Error", result.detail || "Something went wrong");
+      if (saved) {
+        Alert.alert(
+          "Logged Successfully 🌿",
+          "Your daily self-reflection metrics have been recorded into your health graph.",
+          [{ text: "Done", onPress: () => navigation.goBack() }]
+        );
       }
     } catch (error) {
       console.error("❌ Mood Log Submit Error:", error);
-      Alert.alert("Connection Error", "Could not connect to the server");
+      Alert.alert("Submission Notice", error.message || "Could not sync mood entry to backend.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        
-        {/* Header */}
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={styles.backText}>‹ Back</Text>
+      {/* Top Header Bar with Standardized Non-Obtrusive Settings Button */}
+      <View style={styles.headerBar}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.headerBackBtn}>
+          <ArrowLeft size={20} color="#0D9488" />
+          <Text style={styles.headerBackText}>Back</Text>
         </TouchableOpacity>
-        
+
+        <View style={styles.headerRightGroup}>
+          <View style={styles.headerRightBadge}>
+            <HeartPulse size={14} color="#0F766E" style={{ marginRight: 4 }} />
+            <Text style={styles.headerRightBadgeText}>Daily Tracking</Text>
+          </View>
+          <TouchableOpacity 
+            style={styles.headerGearBtn}
+            onPress={() => navigation.navigate('Main', { screen: 'Profile' })}
+            activeOpacity={0.7}
+            accessibilityLabel="Settings"
+          >
+            <Settings size={18} color="#0D9488" />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
         <Text style={styles.title}>Mood Tracking</Text>
         <Text style={styles.subtitle}>How are you feeling today?</Text>
 
@@ -133,9 +172,9 @@ const MoodTrackingScreen = ({ navigation }) => {
               step={1}
               value={stressLevel}
               onValueChange={(val) => setStressLevel(val)}
-              minimumTrackTintColor="#818CF8"
-              maximumTrackTintColor="#F1F5F9"
-              thumbTintColor="#6366F1"
+              minimumTrackTintColor="#0D9488"
+              maximumTrackTintColor="#E2E8F0"
+              thumbTintColor="#0D9488"
             />
             <Text style={styles.limitText}>High</Text>
           </View>
@@ -187,6 +226,7 @@ const MoodTrackingScreen = ({ navigation }) => {
           <TextInput 
             style={[styles.input, {height: 100, textAlignVertical: 'top'}]} 
             placeholder="How was your day truly?" 
+            placeholderTextColor="#94A3B8"
             multiline
             numberOfLines={4}
             value={note}
@@ -195,8 +235,17 @@ const MoodTrackingScreen = ({ navigation }) => {
         </View>
 
         {/* Save Button */}
-        <TouchableOpacity style={styles.saveBtn} onPress={handleSaveEntry}>
-          <Text style={styles.saveBtnText}>Save Entry</Text>
+        <TouchableOpacity 
+          style={[styles.saveBtn, isSubmitting && styles.saveBtnDisabled]} 
+          onPress={handleSaveEntry}
+          disabled={isSubmitting}
+          activeOpacity={0.85}
+        >
+          {isSubmitting ? (
+            <ActivityIndicator color="#FFFFFF" size="small" />
+          ) : (
+            <Text style={styles.saveBtnText}>Save Entry</Text>
+          )}
         </TouchableOpacity>
 
       </ScrollView>
@@ -205,30 +254,187 @@ const MoodTrackingScreen = ({ navigation }) => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
-  scrollContent: { padding: 25, paddingBottom: 50 },
-  backBtn: { marginBottom: 10 },
-  backText: { color: '#64748B', fontSize: 16 },
-  title: { fontSize: 26, fontWeight: 'bold', color: '#1E293B' },
-  subtitle: { fontSize: 15, color: '#64748B', marginBottom: 25 },
-  whiteCard: { backgroundColor: '#FFF', padding: 20, borderRadius: 24, marginBottom: 15, elevation: 1, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 10 },
-  cardHeader: { fontSize: 16, fontWeight: 'bold', color: '#1E293B', marginBottom: 15 },
-  moodRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  moodItem: { alignItems: 'center' },
-  emoji: { fontSize: 30, opacity: 0.3 },
-  selectedEmoji: { opacity: 1, transform: [{scale: 1.2}] },
-  moodLabel: { fontSize: 11, color: '#94A3B8', marginTop: 5 },
-  selectedLabel: { color: '#6366F1', fontWeight: 'bold' },
-  sliderContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
-  slider: { flex: 1, height: 40, marginHorizontal: 10 },
-  limitText: { fontSize: 12, color: '#94A3B8', fontWeight: '500' },
-  activityRow: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap' },
-  activityItem: { alignItems: 'center', padding: 12, borderRadius: 18, borderWidth: 1, borderColor: '#F1F5F9', width: '22%' },
-  selectedActivity: { borderColor: '#6366F1', backgroundColor: '#EEF2FF' },
-  activityLabel: { fontSize: 10, color: '#64748B', marginTop: 5 },
-  input: { backgroundColor: '#F8FAFC', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', color: '#1E293B', fontSize: 15 },
-  saveBtn: { backgroundColor: '#C7D2FE', padding: 18, borderRadius: 18, alignItems: 'center', marginTop: 10, shadowColor: '#6366F1', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 5 },
-  saveBtnText: { color: '#6366F1', fontWeight: 'bold', fontSize: 16 }
+  container: { 
+    flex: 1, 
+    backgroundColor: '#F8FAFC' 
+  },
+  headerBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9'
+  },
+  headerBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center'
+  },
+  headerBackText: {
+    color: '#0D9488',
+    fontSize: 15,
+    fontWeight: '600',
+    marginLeft: 6
+  },
+  headerRightGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  headerRightBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E6F4F1',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12
+  },
+  headerRightBadgeText: {
+    color: '#0F766E',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  headerGearBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
+  scrollContent: { 
+    padding: 22, 
+    paddingBottom: 60 
+  },
+  title: { 
+    fontSize: 26, 
+    fontWeight: '800', 
+    color: '#1E293B',
+    marginTop: 4
+  },
+  subtitle: { 
+    fontSize: 14, 
+    color: '#64748B', 
+    marginTop: 4,
+    marginBottom: 20 
+  },
+  whiteCard: { 
+    backgroundColor: '#FFF', 
+    padding: 18, 
+    borderRadius: 20, 
+    marginBottom: 14, 
+    elevation: 1, 
+    shadowColor: '#0F172A', 
+    shadowOffset: { width: 0, height: 2 }, 
+    shadowOpacity: 0.04, 
+    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: '#F1F5F9'
+  },
+  cardHeader: { 
+    fontSize: 15, 
+    fontWeight: '700', 
+    color: '#1E293B', 
+    marginBottom: 14 
+  },
+  moodRow: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between' 
+  },
+  moodItem: { 
+    alignItems: 'center' 
+  },
+  emoji: { 
+    fontSize: 30, 
+    opacity: 0.35 
+  },
+  selectedEmoji: { 
+    opacity: 1, 
+    transform: [{ scale: 1.25 }] 
+  },
+  moodLabel: { 
+    fontSize: 11, 
+    color: '#94A3B8', 
+    marginTop: 6,
+    fontWeight: '500' 
+  },
+  selectedLabel: { 
+    color: '#0D9488', 
+    fontWeight: '700' 
+  },
+  sliderContainer: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    marginTop: 5 
+  },
+  slider: { 
+    flex: 1, 
+    height: 40, 
+    marginHorizontal: 8 
+  },
+  limitText: { 
+    fontSize: 12, 
+    color: '#94A3B8', 
+    fontWeight: '600' 
+  },
+  activityRow: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    flexWrap: 'wrap',
+    gap: 8
+  },
+  activityItem: { 
+    alignItems: 'center', 
+    padding: 12, 
+    borderRadius: 16, 
+    borderWidth: 1.5, 
+    borderColor: '#F1F5F9', 
+    width: '22%' 
+  },
+  selectedActivity: { 
+    borderColor: '#0D9488', 
+    backgroundColor: '#F0FDFA' 
+  },
+  activityLabel: { 
+    fontSize: 10, 
+    color: '#64748B', 
+    marginTop: 5,
+    fontWeight: '600' 
+  },
+  input: { 
+    backgroundColor: '#F8FAFC', 
+    padding: 14, 
+    borderRadius: 14, 
+    borderWidth: 1.5, 
+    borderColor: '#E2E8F0', 
+    color: '#1E293B', 
+    fontSize: 14,
+    lineHeight: 20
+  },
+  saveBtn: { 
+    backgroundColor: '#0D9488', 
+    paddingVertical: 16, 
+    borderRadius: 16, 
+    alignItems: 'center', 
+    marginTop: 10, 
+    elevation: 2,
+    shadowColor: '#0D9488', 
+    shadowOffset: { width: 0, height: 4 }, 
+    shadowOpacity: 0.25, 
+    shadowRadius: 8 
+  },
+  saveBtnDisabled: {
+    backgroundColor: '#94A3B8'
+  },
+  saveBtnText: { 
+    color: '#FFFFFF', 
+    fontWeight: '700', 
+    fontSize: 16 
+  }
 });
 
 export default MoodTrackingScreen;

@@ -1,35 +1,64 @@
-import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, Image, Animated } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, Image, Animated, StatusBar } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 
 const SplashScreen = ({ navigation }) => {
-  // සජීවීකරණය සඳහා (Fade in effect)
-  const fadeAnim = new Animated.Value(0);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.9)).current;
 
   useEffect(() => {
-    // ලෝගෝ එක පෙනී සිටීමේ සජීවීකරණය
-    Animated.timing(fadeAnim, {
-      toValue: 1,
-      duration: 1500,
-      useNativeDriver: true,
-    }).start();
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 1200,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        friction: 6,
+        useNativeDriver: true,
+      }),
+    ]).start();
 
-    // තත්පර 3 කට පසු Onboarding ස්ක්‍රීන් එකට මාරු වීම
     const timer = setTimeout(() => {
-      navigation.replace('Onboarding'); 
-    }, 3000);
+      if (navigation?.replace) {
+        navigation.replace('Onboarding');
+      }
+    }, 2800);
 
     return () => clearTimeout(timer);
-  }, []);
+  }, [navigation]);
 
   return (
     <View style={styles.container}>
-      <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
-        <View style={styles.logoContainer}>
-          {/* මෙතනට ඔයාගේ heart icon එක දාන්න */}
-          <Text style={styles.heartIcon}>🤍</Text> 
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+
+      <LinearGradient
+        colors={['#0B1120', '#0F172A', '#1E293B']}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+        style={StyleSheet.absoluteFillObject}
+      />
+
+      <Animated.View
+        style={[
+          styles.content,
+          {
+            opacity: fadeAnim,
+            transform: [{ scale: scaleAnim }],
+          },
+        ]}
+      >
+        <View style={styles.logoHalo}>
+          <Image
+            source={require('../../assets/mindcare-logo.png')}
+            style={styles.logo}
+            resizeMode="contain"
+          />
         </View>
-        <Text style={styles.title}>Mind Care</Text>
-        <Text style={styles.subtitle}>Your Mental Health Companion</Text>
+
+        <Text style={styles.title}>MindCare</Text>
+        <Text style={styles.subtitle}>MindCare - Calm in Every Curve</Text>
       </Animated.View>
     </View>
   );
@@ -38,36 +67,47 @@ const SplashScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#9BA3FF', // ඔයාගේ image එකේ තියෙන ලා නිල්/දම් පාට
+    backgroundColor: '#0F172A',
     justifyContent: 'center',
     alignItems: 'center',
   },
   content: {
     alignItems: 'center',
+    paddingHorizontal: 32,
   },
-  logoContainer: {
-    width: 100,
-    height: 100,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-    borderRadius: 25,
+  logoHalo: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    backgroundColor: 'rgba(20, 184, 166, 0.08)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(20, 184, 166, 0.25)',
+    shadowColor: '#14B8A6',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 8,
   },
-  heartIcon: {
-    fontSize: 50,
-    color: '#FFF',
+  logo: {
+    width: 140,
+    height: 140,
   },
   title: {
     fontSize: 36,
-    fontWeight: 'bold',
-    color: '#FFF',
+    fontWeight: '700',
+    color: '#F8FAFC',
+    letterSpacing: 1.5,
   },
   subtitle: {
     fontSize: 16,
-    color: '#FFF',
+    color: '#94A3B8',
     marginTop: 10,
-    opacity: 0.9,
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    fontWeight: '400',
   },
 });
 

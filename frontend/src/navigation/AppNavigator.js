@@ -21,9 +21,12 @@ import AssessmentScreen from '../screens/AssessmentScreen';
 import BreathingExercise from '../screens/BreathingExercise';
 import FocusTimer from '../screens/FocusTimer';
 import Journaling from '../screens/Journaling';
+import JournalScreen from '../screens/JournalScreen';
 import Meditation from '../screens/Meditation';
+import MeditationScreen from '../screens/MeditationScreen';
 import WeeklyReportScreen from '../screens/WeeklyReportScreen';
-import EditProfileScreen from '../screens/EditProfile'; // අලුතින් එක් කළා
+import EditProfileScreen from '../screens/EditProfile';
+import AplusTrackScreen from '../screens/AplusTrackScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -33,15 +36,20 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarActiveTintColor: '#4F75FF',
+        tabBarActiveTintColor: '#0D9488',
         tabBarInactiveTintColor: '#94A3B8',
         tabBarStyle: { 
-          height: 70, 
+          height: 68, 
           paddingBottom: 10, 
+          paddingTop: 8,
           backgroundColor: '#FFFFFF', 
-          position: 'absolute',
-          borderTopLeftRadius: 20,
-          borderTopRightRadius: 20,
+          borderTopWidth: 1,
+          borderTopColor: '#E2E8F0',
+          elevation: 4,
+          shadowColor: '#64748B',
+          shadowOffset: { width: 0, height: -2 },
+          shadowOpacity: 0.04,
+          shadowRadius: 8,
         },
         tabBarIcon: ({ color, size }) => {
           if (route.name === 'Home') return <Home color={color} size={size} />;
@@ -79,9 +87,16 @@ export default function AppNavigator() {
       {/* Sub-Screens */}
       <Stack.Screen name="BreathingExercise" component={BreathingExercise} />
       <Stack.Screen name="FocusTimer" component={FocusTimer} />
-      <Stack.Screen name="Journaling" component={Journaling} />
-      <Stack.Screen name="Meditation" component={Meditation} />
+      <Stack.Screen name="Journaling" component={JournalScreen} />
+      <Stack.Screen name="JournalScreen" component={JournalScreen} />
+      <Stack.Screen name="ReflectiveJournalScreen" component={JournalScreen} />
+      <Stack.Screen name="Meditation" component={MeditationScreen} />
+      <Stack.Screen name="MeditationScreen" component={MeditationScreen} />
       <Stack.Screen name="WeeklyReport" component={WeeklyReportScreen} /> 
+      <Stack.Screen name="AplusTrack" component={AplusTrackScreen} /> 
+      <Stack.Screen name="AplusTrackScreen" component={AplusTrackScreen} /> 
+      <Stack.Screen name="SupportSanctuary" component={ChatScreen} /> 
+      <Stack.Screen name="SupportSanctuaryScreen" component={ChatScreen} /> 
       
       {/* Profile Management */}
       <Stack.Screen 

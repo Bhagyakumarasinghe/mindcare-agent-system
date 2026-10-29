@@ -1,14 +1,14 @@
-from pydantic import BaseModel, EmailStr, constr, Field
+from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
-    password: constr(min_length=8, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: constr(min_length=8, max_length=72)
+    password: str = Field(..., min_length=8, max_length=72)
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -21,9 +21,11 @@ class UserOut(BaseModel):
 
 # --- MOOD TRACKING SCHEMA ---
 class MoodEntryRequest(BaseModel):
-    mood: str                       # e.g., "Okay", "Great", "Bad"
-    stress_level: int = Field(..., ge=1, le=10) # 1-10 slider එක
-    activities: List[str]           # e.g., ["Exercise", "Reading"]
-    stress_factor: Optional[str] = ""
+    mood: str                                       # e.g., "Okay", "Great", "Bad"
+    stress_score: Optional[int] = Field(None, ge=1, le=10) # 1-10 slider scale
+    stress_level: Optional[int] = Field(None, ge=1, le=10) # Backwards compatibility
+    activities: List[str] = []                      # e.g., ["Exercise", "Reading"]
+    stress_factor: Optional[str] = "None"
     sleep_hours: float
-    note: Optional[str] = ""
+    journal_note: Optional[str] = ""
+    note: Optional[str] = ""                        # Backwards compatibility

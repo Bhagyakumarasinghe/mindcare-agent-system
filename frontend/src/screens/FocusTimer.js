@@ -3,45 +3,50 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Play, Pause, RotateCcw } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { logActivity } from '../api/authService';
 
-const FocusTimer = ({ navigation }) => {
-  const INITIAL_TIME = 25 * 60; // 25 Minutes
+const FocusTimer = ({ navigation, route }) => {
+  const initialMinutes = Number(route?.params?.initialMinutes) || 25;
+  const INITIAL_TIME = initialMinutes * 60;
   const [secondsLeft, setSecondsLeft] = useState(INITIAL_TIME);
   const [isActive, setIsActive] = useState(false);
   const timeSpentRef = useRef(0); // Track actual focus time in seconds
+
+  useEffect(() => {
+    if (route?.params?.initialMinutes) {
+      const mins = Number(route.params.initialMinutes);
+      if (!isNaN(mins) && mins > 0) {
+        setSecondsLeft(mins * 60);
+        setIsActive(false);
+      }
+    }
+  }, [route?.params?.initialMinutes]);
 
   // ---------------------------------------------------------
   // 🔗 BACKEND INTEGRATION: Log Focus Session
   // ---------------------------------------------------------
   const logFocusActivity = async (secondsSpent) => {
-    // තත්පර 10කට අඩුවෙන් Focus කළොත් Log නොකිරීමට
+    // Avoid logging if focused session is under 10 seconds
     if (secondsSpent < 10) return;
 
     try {
-      const token = await AsyncStorage.getItem('userToken');
+      const userStr = await AsyncStorage.getItem('user');
+      const parsedUser = userStr ? JSON.parse(userStr) : null;
+      const userId = parsedUser?.id || 'demo_user';
       const durationMinutes = Math.max(1, Math.round(secondsSpent / 60));
 
-      const response = await fetch('http://10.152.23.156:8000/user/log-activity', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+      await logActivity({
+        user_id: userId,
+        activity_type: 'Study Timer',
+        duration_minutes: durationMinutes,
+        metadata: {
+          seconds_spent: secondsSpent,
+          configured_minutes: initialMinutes,
         },
-        body: JSON.stringify({
-          activity_type: 'Focus Session',
-          duration_minutes: durationMinutes,
-          timestamp: new Date().toISOString()
-        })
       });
-
-      const data = await response.json();
-      if (response.ok) {
-        console.log('✅ Focus activity logged to backend successfully:', data);
-      } else {
-        console.log('❌ Backend log failed:', data);
-      }
+      console.log('✅ Focus activity logged to backend successfully');
     } catch (error) {
-      console.error('❌ Network Error while logging focus session:', error);
+      console.error('❌ Error logging focus session:', error.message || error);
     }
   };
 
@@ -95,11 +100,11 @@ const FocusTimer = ({ navigation }) => {
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: '#EFF6FF' }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: '#F0FDFA' }]}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={handleGoBack} style={styles.backBtn}>
-          <ArrowLeft color="#1E293B" size={24} />
+          <ArrowLeft color="#0F172A" size={24} />
         </TouchableOpacity>
         <Text style={styles.mainTitle}>Focus Session</Text>
         <View style={{ width: 24 }} />
@@ -109,7 +114,7 @@ const FocusTimer = ({ navigation }) => {
       <View style={styles.timerCircle}>
         <Text style={styles.timerText}>{formatTime(secondsLeft)}</Text>
         <Text style={styles.subtitle}>
-          {isActive ? "Stay Focused!" : "Ready to Concentrate?"}
+          {isActive ? "Stay Focused" : "Ready to Concentrate?"}
         </Text>
       </View>
 
@@ -118,6 +123,7 @@ const FocusTimer = ({ navigation }) => {
         <TouchableOpacity 
           style={styles.controlBtn} 
           onPress={() => setIsActive(!isActive)}
+          activeOpacity={0.85}
         >
           {isActive ? (
             <Pause color="#FFF" size={28} />
@@ -129,6 +135,7 @@ const FocusTimer = ({ navigation }) => {
         <TouchableOpacity 
           style={[styles.controlBtn, { backgroundColor: '#94A3B8' }]} 
           onPress={handleReset}
+          activeOpacity={0.85}
         >
           <RotateCcw color="#FFF" size={24} />
         </TouchableOpacity>
@@ -157,37 +164,42 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: '#FFFFFF',
     elevation: 2,
-    shadowColor: '#000',
+    shadowColor: '#0F172A',
     shadowOpacity: 0.05,
-    shadowRadius: 5
+    shadowRadius: 5,
+    borderWidth: 1,
+    borderColor: '#CCFBF1'
   },
   mainTitle: { 
     fontSize: 20, 
-    fontWeight: 'bold', 
-    color: '#1E293B' 
+    fontWeight: '800', 
+    color: '#0F172A',
+    letterSpacing: -0.3
   },
   timerCircle: { 
-    width: 240, 
-    height: 240, 
-    borderRadius: 120, 
+    width: 250, 
+    height: 250, 
+    borderRadius: 125, 
     borderWidth: 8, 
-    borderColor: '#3B82F6', 
+    borderColor: '#0D9488', 
     backgroundColor: '#FFFFFF',
     justifyContent: 'center', 
     alignItems: 'center',
     elevation: 4,
-    shadowColor: '#3B82F6',
-    shadowOpacity: 0.2,
-    shadowRadius: 10
+    shadowColor: '#0D9488',
+    shadowOpacity: 0.18,
+    shadowRadius: 14
   },
   timerText: { 
-    fontSize: 48, 
-    fontWeight: 'bold', 
-    color: '#1E293B' 
+    fontSize: 50, 
+    fontWeight: '800', 
+    color: '#0D9488',
+    letterSpacing: -1
   },
   subtitle: {
     fontSize: 14,
-    color: '#64748B',
+    color: '#0F766E',
+    fontWeight: '600',
     marginTop: 8
   },
   controls: { 
@@ -196,13 +208,16 @@ const styles = StyleSheet.create({
     marginBottom: 40 
   },
   controlBtn: { 
-    backgroundColor: '#3B82F6', 
+    backgroundColor: '#0D9488', 
     width: 64, 
     height: 64, 
     borderRadius: 32, 
     justifyContent: 'center', 
     alignItems: 'center', 
-    elevation: 3 
+    elevation: 3,
+    shadowColor: '#0D9488',
+    shadowOpacity: 0.25,
+    shadowRadius: 8
   }
 });
 

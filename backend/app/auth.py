@@ -1,6 +1,6 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer
-from jose import jwt, JWTError  # මෙන්න මේ දෙක import කරගන්න
+from jose import jwt, JWTError
 from app.utils.jwt_handler import decode_access_token
 
 auth_scheme = HTTPBearer()
@@ -12,7 +12,6 @@ async def get_current_user(token: str = Depends(auth_scheme)):
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # decode_access_token එක හරහා payload එක ලබා ගැනීම
         payload = decode_access_token(token.credentials)
         user_id = payload.get("user_id")
         
@@ -20,7 +19,7 @@ async def get_current_user(token: str = Depends(auth_scheme)):
             raise credentials_exception
         return {"user_id": user_id}
         
-    except JWTError:  # jose library එකේ පොදු error එක මෙයයි
+    except JWTError:
         raise credentials_exception
     except Exception:
         raise credentials_exception

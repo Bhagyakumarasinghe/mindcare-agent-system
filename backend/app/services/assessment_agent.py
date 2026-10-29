@@ -7,7 +7,7 @@ from app.utils.encryption import encrypt_data
 
 load_dotenv()
 
-# ඉතා වැදගත්: flash-lite-latest සඳහා v1beta පාවිච්චි කළ යුතුයි
+# Client configuration with Gemini API
 client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY"),
     http_options={'api_version': 'v1beta'}
@@ -15,23 +15,22 @@ client = genai.Client(
 
 def get_next_question(user_id, user_history):
     """
-    ප්‍රශ්න 5ක් සම්පූර්ණ වන තෙක් Adaptive Assessment එක පවත්වාගෙන යෑම.
+    Maintains an adaptive 5-turn assessment dialogue until completion.
     """
     
-    # 1. ආරම්භක ප්‍රශ්නය (History එක හිස් නම්)
+    # 1. Initial check-in question if history is empty
     if not user_history or len(user_history) == 0:
         return {"question": "Hi! I'm your MindCare assistant. To start our check-in, how has your mood been over the last few days?"}
 
     asked_questions = [str(item.get('question', '')).lower().strip() for item in user_history]
     turn_count = len(user_history)
     
-    # ඔයාට අවශ්‍ය මොඩලය මෙතන නිවැරදිව තියෙනවා
     SELECTED_MODEL = "gemini-flash-lite-latest"
 
     print(f"\n--- [DEBUG ASSESSMENT START] ---")
     print(f"Turn: {turn_count} | User: {user_id}")
 
-    # 2. ප්‍රශ්න 5ක් සම්පූර්ණ වූ පසු Scoring සිදු කිරීම
+    # 2. Analyze conversation and score upon completion of 5 turns
     if turn_count >= 5:
         print("DEBUG: Final step reached. Analyzing conversation for scoring...")
         
@@ -54,7 +53,7 @@ def get_next_question(user_id, user_history):
             final_score = max(0, min(int(analysis_result.get("score", 5)), 10))
             final_label = analysis_result.get("label", "Completed")
             
-            # Encryption සහ Neo4j ගබඩා කිරීම
+            # Encrypt and save assessment into Neo4j
             save_assessment_to_graph(user_id, final_score, final_label, encrypt_data(json.dumps(user_history)))
             return {"question": f"FINISH | {final_score} | {final_label}"}
 
@@ -63,7 +62,7 @@ def get_next_question(user_id, user_history):
             save_assessment_to_graph(user_id, 5, "Completed", encrypt_data(json.dumps(user_history)))
             return {"question": "FINISH | 5 | Assessment Completed"}
 
-    # 3. ඊළඟ ප්‍රශ්නය ලබා ගැනීමට AI කැඳවීම
+    # 3. Request next adaptive follow-up question via AI
     prompt_text = f"""
     Role: Student Mental Health AI. 
     Ask ONE brief (max 10 words) follow-up question based on the user's last answer: "{user_history[-1].get('answer')}".
@@ -82,14 +81,12 @@ def get_next_question(user_id, user_history):
             }
         )
         
-        # AI එකෙන් එන දත්ත terminal එකේ print කරලා බලන්න
         print(f"DEBUG AI RESPONSE: {response.text}")
-        
         return json.loads(response.text.strip())
 
     except Exception as e:
         print(f"!!! AI ERROR !!!: {str(e)}")
-        # Fallback Mechanism: AI එකේ මොනවා හරි අවුලක් ආවොත් මේ ප්‍රශ්න ටික පිළිවෙලට අහනවා
+        # Fallback mechanism if AI service encounters latency
         fallbacks = [
             "How has your sleep quality been over the past few nights?",
             "Are you feeling overwhelmed by your academic workload?",

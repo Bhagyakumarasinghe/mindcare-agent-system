@@ -6,13 +6,8 @@ from app.db.mongo import db as mongo_db
 from app.db.neo4j import save_journal_to_graph
 from app.schemas.relax_schema import ActivityLogSchema, JournalCreateSchema
 
-# --- AUTH DEPENDENCY HANDLING ---
-try:
-    from app.utils.jwt_handler import get_current_user
-except ImportError:
-    # `get_current_user` jwt_handler හි නොමැති නම් Backend Crash වීම වැළැක්වීමට
-    async def get_current_user():
-        return {"id": "guest_user", "email": "guest@mindcare.com"}
+# --- AUTH DEPENDENCY ---
+from app.routers.protected_routes import get_current_user
 
 router = APIRouter(prefix="/user", tags=["Relaxation & Tools"])
 
@@ -36,12 +31,14 @@ async def get_daily_tip():
 async def save_journal(
     payload: JournalCreateSchema, current_user: dict = Depends(get_current_user)
 ):
-    user_id = current_user.get("id") or current_user.get("email") or "guest_user"
+    user_id = str(current_user.get("id") or current_user.get("email") or "guest_user")
     created_timestamp = payload.date or datetime.datetime.utcnow().isoformat()
+    emotion = payload.emotion or "Reflective"
 
     journal_doc = {
         "user_id": user_id,
         "content": payload.content,
+        "emotion": emotion,
         "created_at": created_timestamp,
         "type": "journal",
     }
@@ -51,14 +48,15 @@ async def save_journal(
         mongo_res = await mongo_db["journals"].insert_one(journal_doc)
         journal_id = str(mongo_res.inserted_id)
 
-        # B. Save to Neo4j Knowledge Graph
+        # B. Save to Neo4j Knowledge Graph for longitudinal emotion tracking
         try:
             save_journal_to_graph(
                 user_id=user_id,
                 content=payload.content,
                 date=created_timestamp,
+                emotion=emotion,
             )
-            print(f"✅ Journal entry saved to Neo4j & MongoDB for user {user_id}")
+            print(f"✅ Journal entry (emotion: {emotion}) saved to Neo4j & MongoDB for user {user_id}")
         except Exception as graph_err:
             print(f"⚠️ Neo4j Sync Error (MongoDB saved): {str(graph_err)}")
 
@@ -93,7 +91,7 @@ async def log_activity(
         # Save to MongoDB Activity Logs
         res = await mongo_db["activity_logs"].insert_one(activity_doc)
         
-        # Terminal Console එකේ සාර්ථකව Log වූ බව පෙන්වීමට
+        # Log success output to terminal console
         print(
             f"✅ Activity Logged: [{payload.activity_type}] "
             f"for {payload.duration_minutes} min(s) | User: {user_id}"

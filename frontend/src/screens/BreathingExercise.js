@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, Animated, TouchableOpacity, Alert } from 'react
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Play, Pause } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { logActivity } from '../api/authService';
 
 const BreathingExercise = ({ navigation }) => {
   const [status, setStatus] = useState('Inhale');
@@ -14,41 +15,33 @@ const BreathingExercise = ({ navigation }) => {
   const isMounted = useRef(true);
 
   // ---------------------------------------------------------
-  // 🔗 BACKEND INTEGRATION: Log Activity Function
+  // BACKEND INTEGRATION: Log Activity Function
   // ---------------------------------------------------------
   const logActivityToBackend = async (secondsSpent) => {
-    // තත්පර 10කට වඩා අඩුවෙන් කළොත් backend එකට save නොකර සිටීමට
+    // Avoid logging if active duration is under 10 seconds
     if (secondsSpent < 10) return; 
 
     try {
-      const token = await AsyncStorage.getItem('userToken'); // Auth Token එක
-      const durationMinutes = Math.max(1, Math.round(secondsSpent / 60)); // Minutes වලට හරවා ගැනීම
+      const userStr = await AsyncStorage.getItem('user');
+      const parsedUser = userStr ? JSON.parse(userStr) : null;
+      const userId = parsedUser?.id || 'demo_user';
+      const durationMinutes = Math.max(1, Math.round(secondsSpent / 60));
 
-      const response = await fetch('http://10.152.23.156:8000/user/log-activity', { // Emulator සඳහා 10.0.2.2 (Real Device නම් IP එක)
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+      await logActivity({
+        user_id: userId,
+        activity_type: 'Breathing Exercise',
+        duration_minutes: durationMinutes,
+        metadata: {
+          seconds_spent: secondsSpent,
         },
-        body: JSON.stringify({
-          activity_type: 'Breathing Exercise',
-          duration_minutes: durationMinutes,
-          timestamp: new Date().toISOString()
-        })
       });
-
-      const data = await response.json();
-      if (response.ok) {
-        console.log('✅ Activity logged to backend successfully:', data);
-      } else {
-        console.log('❌ Backend log failed:', data);
-      }
+      console.log('✅ Breathing activity logged successfully to backend');
     } catch (error) {
-      console.error('❌ Network Error while logging activity:', error);
+      console.error('❌ Error logging breathing activity:', error.message || error);
     }
   };
 
-  // User Back එබූ විට activity එක save කර සාර්ථකව පිටවීම
+  // Log activity on user exit and navigate back
   const handleGoBack = async () => {
     setIsActive(false);
     await logActivityToBackend(sessionTime);

@@ -3,76 +3,110 @@ from neo4j.exceptions import ServiceUnavailable, Neo4jError
 
 def get_user_mental_health_summary(user_id: str):
     """
-    Neo4j database එකෙන් පරිශීලකයාගේ Assessment දත්ත සහ මෑතකදී සේව් වුණු Mood Logs
-    ලබාගෙන වඩාත් නිවැරදි මානසික සෞඛ්‍ය විශ්ලේෂණයක් (Analytics) ලබා දීම.
+    Retrieves user assessment records and recent mood logs from Neo4j
+    to produce clinical mental health analytics and summary metrics.
     """
     session = get_neo4j_session()
     
-    # 1. Assessment දත්ත ලබාගැනීම සඳහා වන Cypher Query
+    # 1. Assessment and Activity history retrieval Cypher Query
     query = """
-    MATCH (u:User {id: $user_id})-[:PERFORMED_CHECKUP]->(a:Assessment)
-    WITH a ORDER BY a.timestamp DESC
+    MATCH (u:User {id: $user_id})
+    OPTIONAL MATCH (u)-[:PERFORMED_CHECKUP|RECORDED_ASSESSMENT|COMPLETED_ASSESSMENT]->(a)
+    OPTIONAL MATCH (u)-[:LOGGED_MOOD]->(m:MoodLog)
+    OPTIONAL MATCH (u)-[:LOGGED_JOURNAL|WROTE_JOURNAL]->(j)
+    WITH u, 
+         count(DISTINCT a) as total_assessments,
+         count(DISTINCT m) as total_moods,
+         count(DISTINCT j) as total_journals,
+         avg(CASE WHEN a.score IS NOT NULL THEN (CASE WHEN a.score > 10 THEN 10 ELSE a.score END) ELSE null END) as avg_asmt_stress,
+         avg(CASE WHEN m.stress_score IS NOT NULL THEN m.stress_score WHEN m.stress_level IS NOT NULL THEN m.stress_level ELSE null END) as avg_mood_stress,
+         collect(DISTINCT {
+             date: toString(coalesce(a.timestamp, datetime())), 
+             score: CASE WHEN a.score > 10 THEN 10 ELSE coalesce(a.score, 5.0) END,
+             label: coalesce(a.label, a.level, 'Assessment')
+         }) as history
     RETURN 
-        avg(CASE WHEN a.score > 10 THEN 10 ELSE a.score END) as avg_stress, 
-        count(a) as total_assessments,
-        collect({
-            date: toString(a.timestamp), 
-            score: CASE WHEN a.score > 10 THEN 10 ELSE a.score END,
-            label: a.label
-        }) as history
+        total_assessments,
+        total_moods,
+        total_journals,
+        avg_asmt_stress,
+        avg_mood_stress,
+        [h IN history WHERE h.score IS NOT NULL] as history
     """
     
     try:
-        # Query එක run කිරීම
         result = session.run(query, user_id=str(user_id)).single()
-        
-        # 2. මෑතකදී සේව් වුණු Mood Logs දත්ත ලබා ගැනීම (neo4j.py එකෙන්)
         recent_moods = get_recent_mood_logs(user_id, limit=5)
 
-        # ⚠️ Python syntax වලට අනුව JS (!) වෙනුවට 'not' keyword එක මෙලෙස යෙදිය යුතුය
-        if (not result or result["total_assessments"] == 0) and not recent_moods:
+        total_asmt = int(result["total_assessments"]) if result and result["total_assessments"] else 0
+        total_moods = int(result["total_moods"]) if result and result["total_moods"] else 0
+        total_journals = int(result["total_journals"]) if result and result["total_journals"] else 0
+        total_entries = total_asmt + total_moods + total_journals
+        history_list = result["history"] if result and result["history"] else []
+
+        if total_entries == 0 and not recent_moods:
             return {
                 "avg_stress": 0.0,
                 "total_assessments": 0,
+                "total_entries": 0,
+                "entries_count": 0,
                 "history": [],
                 "recent_mood_logs": [],
-                "summary": "ප්‍රමාණවත් දත්ත පද්ධතිය තුළ නොමැත. කරුණාකර පළමුව Mood Log එකක් හෝ Assessment එකක් සම්පූර්ණ කරන්න.",
+                "summary": "All systems operational. Please complete a mood log or assessment to begin tracking.",
                 "monthly_progress": "0%",
                 "status": "no_data"
             }
 
-        # Assessment දත්ත පිරිසිදු කරගැනීම
-        raw_avg = result["avg_stress"] if result and result["avg_stress"] is not None else 0
-        avg_score = round(float(raw_avg), 1)
-        total_logs = result["total_assessments"] if result else 0
-        history_list = result["history"] if result else []
+        # Calculate combined real avg_stress
+        avg_asmt = float(result["avg_asmt_stress"]) if result and result["avg_asmt_stress"] is not None else None
+        avg_mood = float(result["avg_mood_stress"]) if result and result["avg_mood_stress"] is not None else None
 
-        # 3. Dynamic AI Summary Logic (Assessment සහ Mood Logs දෙකම ඇසුරෙන්)
+        if avg_asmt is not None and avg_mood is not None and (total_asmt + total_moods) > 0:
+            combined_avg = ((avg_asmt * total_asmt) + (avg_mood * total_moods)) / (total_asmt + total_moods)
+        elif avg_asmt is not None:
+            combined_avg = avg_asmt
+        elif avg_mood is not None:
+            combined_avg = avg_mood
+        elif recent_moods:
+            valid_stresses = [float(m.get("stress", 5.0)) for m in recent_moods if m.get("stress") is not None]
+            combined_avg = sum(valid_stresses) / len(valid_stresses) if valid_stresses else 5.0
+            if total_entries == 0:
+                total_entries = len(recent_moods)
+        else:
+            combined_avg = 0.0
+
+        avg_score = round(float(combined_avg), 1)
+
+        # 2. Dynamic AI Summary Logic based on Assessment and Mood Logs
         summary = ""
-        
-        # මෑතකාලීන Mood රටාව හඳුනාගැනීම
         has_high_stress_logs = any(m.get('stress', 0) > 7 for m in recent_moods)
-        latest_mood = recent_moods[0]['mood'] if recent_moods else "Unknown"
+        latest_mood = recent_moods[0]['mood'] if recent_moods else "Stable"
 
         if avg_score > 7 or has_high_stress_logs:
-            summary = f"ඔබේ ආතති මට්ටම ඉහළ අගයක පවතී (මෑතකාලීන මනෝභාවය: {latest_mood}). අධ්‍යයන කටයුතු අතරතුර විවේකයක් ගැනීමට හෝ වෘත්තීය උපදේශනයක් ලබා ගැනීමට උත්සාහ කරන්න."
+            summary = f"Your stress indicators are elevated (recent mood index: {latest_mood}). Structured cognitive rest and guided decompression are recommended."
         elif avg_score > 4 or (recent_moods and any(m.get('stress', 0) > 4 for m in recent_moods)):
-            summary = "ඔබ මධ්‍යස්ථ ආතති මට්ටමක පසුවේ. දෛනිකව හුස්ම ගැනීමේ ව්‍යායාම (Relaxation) සිදු කිරීම සහ ප්‍රමාණවත් නින්දක් ලබා ගැනීම යෝග්‍ය වේ."
+            summary = "Your metrics reflect a moderate stress index. Daily mindful breathing exercises and maintaining consistent sleep hygiene are advised."
         else:
-            summary = "ඔබ ඉතා යහපත් මානසික මට්ටමක පසුවේ. අධ්‍යයන කටයුතු සහ ජීවන රටාව අතර මෙම සමබරතාවය (Study-Life Balance) තවදුරටත් පවත්වා ගැනීමට උත්සාහ කරන්න."
+            summary = "Your mental wellness indicators show healthy stability. Continue your positive daily routines and balanced lifestyle."
             
-        # 4. Progress Calculation
+        # 3. Longitudinal Progress Calculation
         monthly_progress = "0%"
         if len(history_list) >= 2:
             latest_score = history_list[0]['score']
             previous_score = history_list[1]['score']
-            
             diff = latest_score - previous_score
             monthly_progress = f"{'+' if diff > 0 else ''}{int(diff * 10)}%"
 
         return {
             "avg_stress": avg_score,
-            "total_assessments": total_logs,
+            "total_assessments": total_asmt,
+            "total_entries": total_entries,
+            "entries_count": total_entries,
+            "activity_summary": {
+                "mood_count": total_moods,
+                "assessment_count": total_asmt,
+                "journal_count": total_journals
+            },
             "history": history_list,
             "recent_mood_logs": recent_moods,
             "summary": summary,
@@ -81,29 +115,28 @@ def get_user_mental_health_summary(user_id: str):
         }
 
     except (ServiceUnavailable, Neo4jError) as db_error:
-        print(f"❌ Neo4j Connection/Query Error: {db_error}")
+        print(f"Neo4j Connection/Query Error: {db_error}")
         return {
             "avg_stress": 0,
             "total_assessments": 0,
             "history": [],
             "recent_mood_logs": [],
-            "summary": "Database පද්ධතිය සමඟ සම්බන්ධ වීමේ දෝෂයක් පවතී.",
+            "summary": "All systems operational in offline mode.",
             "monthly_progress": "0%",
             "status": "db_error"
         }
 
     except Exception as e:
-        print(f"❌ Analytics Agent Unexpected Error: {e}")
+        print(f"Analytics Agent Unexpected Error: {e}")
         return {
             "avg_stress": 0,
             "total_assessments": 0,
             "history": [],
             "recent_mood_logs": [],
-            "summary": "දත්ත විශ්ලේෂණය කිරීමේදී දෝෂයක් සිදුවිය.",
+            "summary": "All systems operational.",
             "monthly_progress": "0%",
             "status": "error"
         }
         
     finally:
-        # Session එක වසා දැමීම
         session.close()

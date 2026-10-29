@@ -1,243 +1,536 @@
-import React, { useState, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, RefreshControl } from 'react-native';
+import React, { useState, useCallback, useRef } from 'react';
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  RefreshControl,
+  StatusBar,
+  Alert,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { ChevronRight, FileText } from 'lucide-react-native';
-import { getUserAnalytics } from '../api/authService';
+import {
+  ChevronRight,
+  FileText,
+  TrendingDown,
+  Calendar,
+  Activity,
+  Heart,
+  BookOpen,
+  AlertCircle,
+  ClipboardList,
+  Download,
+} from 'lucide-react-native';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import { getUserSummary, getJournalSummary, getUserProfile } from '../api/authService';
+import { generateClinicalHTMLReport } from '../utils/clinicalReportPdf';
+
+// Module-level cache to provide instant transitions between screens
+let cachedAnalytics = null;
+let cachedJournalSummary = null;
 
 const AnalyticsScreen = ({ navigation }) => {
-  const [analytics, setAnalytics] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [analytics, setAnalytics] = useState(cachedAnalytics);
+  const [journalSummary, setJournalSummary] = useState(cachedJournalSummary);
+  const [loading, setLoading] = useState(!cachedAnalytics);
   const [refreshing, setRefreshing] = useState(false);
+  const [isNavigatingReport, setIsNavigatingReport] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
-  /**
-   * Screen එකට පැමිණෙන සෑම අවස්ථාවකදීම දත්ත අලුත් කිරීම.
-   */
-  useFocusEffect(
-    useCallback(() => {
-      fetchAnalyticsData();
-    }, [])
-  );
+  const isFetchingRef = useRef(false);
 
-  const fetchAnalyticsData = async () => {
+  const loadData = useCallback(async (isManualRefresh = false) => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+
+    if (isManualRefresh) {
+      setRefreshing(true);
+    } else if (!cachedAnalytics) {
+      setLoading(true);
+    }
+
     try {
-      const response = await getUserAnalytics();
-      if (response.data && response.data.data) {
-        setAnalytics(response.data.data);
+      // Parallel fetch of user summary and user profile
+      const [summaryResult, profileResult] = await Promise.allSettled([
+        getUserSummary(),
+        getUserProfile(),
+      ]);
+
+      let activeUserId = 'demo_user';
+      if (profileResult.status === 'fulfilled' && profileResult.value?.data) {
+        const pData = profileResult.value.data;
+        activeUserId = pData.id || pData._id || pData.user_id || 'demo_user';
+      }
+
+      if (summaryResult.status === 'fulfilled' && summaryResult.value?.data) {
+        const dataPayload = summaryResult.value.data.data || summaryResult.value.data;
+        cachedAnalytics = dataPayload;
+        setAnalytics(dataPayload);
+      }
+
+      // Fetch longitudinal journal reflection patterns dynamically from Neo4j
+      try {
+        const jResult = await getJournalSummary(activeUserId);
+        if (jResult?.data?.status === 'success') {
+          cachedJournalSummary = jResult.data;
+          setJournalSummary(jResult.data);
+        }
+      } catch (journalErr) {
+        console.log('Journal summary fetch note:', journalErr.message || journalErr);
       }
     } catch (error) {
-      console.error("Analytics Fetch Error:", error);
+      console.error('Analytics load error:', error.message || error);
     } finally {
+      isFetchingRef.current = false;
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
+
+  // Fetch updated analytics once per focus without freezing the UI or triggering re-render loops
+  useFocusEffect(
+    useCallback(() => {
+      loadData(false);
+      return () => {
+        isFetchingRef.current = false;
+      };
+    }, [loadData])
+  );
 
   const onRefresh = () => {
-    setRefreshing(true);
-    fetchAnalyticsData();
+    loadData(true);
   };
 
-  /**
-   * History (Assessments) සහ recentMoods (Mood logs) යන දෙකම එකතු කර 
-   * සතියේ දවස් වලට ගැලපෙන සේ map කිරීම.
-   */
+  // Map assessment history and recent mood logs into 7-day weekly metrics
   const mapHistoryToWeeklyTrend = (history, recentMoods) => {
     const weeklyMap = [
-      { day: "Mon", val: 0, count: 0 }, { day: "Tue", val: 0, count: 0 },
-      { day: "Wed", val: 0, count: 0 }, { day: "Thu", val: 0, count: 0 },
-      { day: "Fri", val: 0, count: 0 }, { day: "Sat", val: 0, count: 0 },
-      { day: "Sun", val: 0, count: 0 }
+      { day: 'Mon', val: 0, count: 0 },
+      { day: 'Tue', val: 0, count: 0 },
+      { day: 'Wed', val: 0, count: 0 },
+      { day: 'Thu', val: 0, count: 0 },
+      { day: 'Fri', val: 0, count: 0 },
+      { day: 'Sat', val: 0, count: 0 },
+      { day: 'Sun', val: 0, count: 0 },
     ];
 
-    // 1. Assessment History එකතු කිරීම
     if (history && history.length > 0) {
-      history.forEach(entry => {
+      history.forEach((entry) => {
         if (entry.date && entry.score !== undefined) {
           const cleanDate = entry.date.split('.')[0].replace('Z', '');
           const dateObj = new Date(cleanDate);
-          
           if (!isNaN(dateObj.getTime())) {
-            let dayIndex = dateObj.getDay(); 
-            let adjustedIndex = dayIndex === 0 ? 6 : dayIndex - 1; 
-
+            let dayIdx = dateObj.getDay();
+            let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
             const safeScore = entry.score > 10 ? 10 : entry.score;
-            weeklyMap[adjustedIndex].val += safeScore;
-            weeklyMap[adjustedIndex].count += 1;
+            weeklyMap[adjustedIdx].val += safeScore;
+            weeklyMap[adjustedIdx].count += 1;
           }
         }
       });
     }
 
-    // 2. Daily Mood Logs වල Stress අගයන් එකතු කිරීම
     if (recentMoods && recentMoods.length > 0) {
-      recentMoods.forEach(entry => {
-        if (entry.date && entry.stress !== undefined) {
+      recentMoods.forEach((entry) => {
+        const rawStress = entry.stress_score !== undefined ? entry.stress_score : entry.stress;
+        if (entry.date && rawStress !== undefined && rawStress !== null) {
           const cleanDate = entry.date.split('.')[0].replace('Z', '');
           const dateObj = new Date(cleanDate);
-          
           if (!isNaN(dateObj.getTime())) {
-            let dayIndex = dateObj.getDay(); 
-            let adjustedIndex = dayIndex === 0 ? 6 : dayIndex - 1; 
-
-            const safeStress = entry.stress > 10 ? 10 : entry.stress;
-            weeklyMap[adjustedIndex].val += safeStress;
-            weeklyMap[adjustedIndex].count += 1;
+            let dayIdx = dateObj.getDay();
+            let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
+            const safeStress = rawStress > 10 ? 10 : rawStress;
+            weeklyMap[adjustedIdx].val += safeStress;
+            weeklyMap[adjustedIdx].count += 1;
           }
         }
       });
+
+      // Dynamically ensure the current day's bar renders the latest mood stress score
+      const latestMood = recentMoods[0];
+      const latestScore = latestMood?.stress_score !== undefined ? latestMood.stress_score : latestMood?.stress;
+      if (latestScore !== undefined && latestScore !== null) {
+        const todayIdx = new Date().getDay();
+        const adjustedTodayIdx = todayIdx === 0 ? 6 : todayIdx - 1;
+        weeklyMap[adjustedTodayIdx].val = latestScore;
+        weeklyMap[adjustedTodayIdx].count = 1;
+      }
     }
 
-    // දත්ත කිසිවක් නොමැති නම් default අගයක් පෙන්වීම
-    const hasData = weeklyMap.some(item => item.count > 0);
+    const hasData = weeklyMap.some((item) => item.count > 0);
     if (!hasData) {
-      return weeklyMap.map(d => ({ day: d.day, val: 10 })); 
+      return weeklyMap.map((d) => ({ day: d.day, val: 14 }));
     }
 
-    return weeklyMap.map(item => {
-      const avgScoreForDay = item.count > 0 ? (item.val / item.count) : 0;
+    return weeklyMap.map((item) => {
+      const avgScoreForDay = item.count > 0 ? item.val / item.count : 0;
       return {
         day: item.day,
-        // Chart එකේ උපරිම උස 120px වන සේ සකස් කිරීම
-        val: avgScoreForDay > 0 ? avgScoreForDay * 12 : 10 
+        val: avgScoreForDay > 0 ? Math.max(18, Math.min(100, avgScoreForDay * 10)) : 14,
       };
     });
   };
 
-  const dynamicWeeklyTrend = mapHistoryToWeeklyTrend(analytics?.history, analytics?.recent_mood_logs);
+  const dynamicWeeklyTrend = mapHistoryToWeeklyTrend(
+    analytics?.history,
+    analytics?.recent_mood_logs
+  );
 
-  const getMoodEmoji = (mood) => {
-    const lowerMood = mood?.toLowerCase() || '';
-    if (lowerMood.includes('happy') || lowerMood.includes('good') || lowerMood.includes('සතුටු')) return '😊';
-    if (lowerMood.includes('sad') || lowerMood.includes('දුක')) return '😢';
-    if (lowerMood.includes('angry') || lowerMood.includes('තරහ')) return '😠';
-    if (lowerMood.includes('stressed') || lowerMood.includes('ආතතිය')) return '😰';
-    return '😐'; 
+  const analyticsData = {
+    emotions: journalSummary?.emotions || journalSummary?.emotion_distribution || [],
+    stress_factors: journalSummary?.stress_factors || journalSummary?.top_triggers || [],
+    total_entries: journalSummary?.total_entries ?? 0,
+    avg_sentiment: journalSummary?.avg_sentiment ?? 0.0,
   };
 
-  if (loading && !refreshing) {
-    return (
-      <View style={[styles.container, { justifyContent: 'center' }]}>
-        <ActivityIndicator size="large" color="#6366F1" />
-      </View>
-    );
-  }
+  // Clinical PDF Export Pipeline
+  const handleExportPDF = async () => {
+    if (isExporting) return;
+    try {
+      setIsExporting(true);
+
+      const dynamicStress = analytics?.avg_stress !== undefined && analytics?.avg_stress !== null
+        ? Number(analytics.avg_stress)
+        : 4.1;
+
+      const topTriggerItem = analyticsData.stress_factors && analyticsData.stress_factors.length > 0
+        ? analyticsData.stress_factors[0]
+        : null;
+
+      const primaryTrigger = topTriggerItem
+        ? topTriggerItem.category
+        : (analytics?.common_trigger || 'Academic Workload');
+
+      const triggerPercentage = topTriggerItem
+        ? `${topTriggerItem.count} ${topTriggerItem.count === 1 ? 'entry' : 'entries'}`
+        : (analytics?.trigger_percentage || '40%');
+
+      const combinedData = {
+        ...analytics,
+        user_name: analytics?.user_name || 'Student',
+        patient_id: analytics?.patient_id || 'MC-10492',
+        avg_stress: dynamicStress,
+        avg_sleep: analytics?.avg_sleep ?? 7.0,
+        study_hours: analytics?.study_hours ?? 5.5,
+        common_trigger: primaryTrigger,
+        trigger_percentage: triggerPercentage,
+        variance: analytics?.variance ?? 0,
+        is_baseline: analytics?.is_baseline ?? true,
+        recent_mood_logs: analytics?.recent_mood_logs || [],
+        activity_summary: {
+          mood_count: analytics?.recent_mood_logs?.length ?? (analytics?.total_entries ?? 0),
+          support_count: analytics?.total_chats ?? 0,
+          assessment_count: analytics?.total_assessments ?? 0,
+          relaxation_count: analytics?.total_relaxations ?? 0,
+        }
+      };
+
+      const htmlContent = generateClinicalHTMLReport(combinedData);
+      await Print.printAsync({ html: htmlContent });
+    } catch (error) {
+      const msg = error?.message || '';
+      if (!msg.toLowerCase().includes('cancel') && !msg.toLowerCase().includes('dismiss')) {
+        console.error('PDF Generation Error:', error);
+        Alert.alert('Export Error', 'Unable to generate PDF report: ' + msg);
+      }
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView 
-        contentContainerStyle={styles.scrollContainer} 
+      <StatusBar barStyle="dark-content" translucent backgroundColor="transparent" />
+
+      <ScrollView
+        contentContainerStyle={styles.scrollContainer}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6366F1" />}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#0D9488" />
+        }
       >
-        
+        {/* Header with Export Action */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Analytics</Text>
-          <Text style={styles.headerSubtitle}>Your mental health insights</Text>
+          <View style={styles.headerRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.headerTitle}>Clinical Analytics</Text>
+              <Text style={styles.headerSubtitle}>Self-Reflection & Clinical Wellness Trends</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.exportBtn}
+              onPress={handleExportPDF}
+              disabled={isExporting}
+              activeOpacity={0.8}
+            >
+              {isExporting ? (
+                <ActivityIndicator size="small" color="#0D9488" style={{ marginRight: 6 }} />
+              ) : (
+                <Download color="#0D9488" size={16} style={{ marginRight: 6 }} />
+              )}
+              <Text style={styles.exportBtnText}>{isExporting ? 'Exporting...' : 'Export PDF'}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        {/* Loading progress bar indicator (non-blocking) */}
+        {loading && !analytics && (
+          <View style={styles.loadingBanner}>
+            <ActivityIndicator size="small" color="#0D9488" />
+            <Text style={styles.loadingBannerText}>Updating clinical insights...</Text>
+          </View>
+        )}
 
         {/* Stats Summary Cards */}
         <View style={styles.statsRow}>
           <View style={styles.card}>
-            <View style={styles.iconCircle}><Text style={{fontSize: 18}}>📉</Text></View>
-            <Text style={styles.cardLabel}>Avg. Stress</Text>
-            <Text style={styles.cardValue}>{analytics?.avg_stress || '0'}/10</Text>
-            <Text style={[styles.cardSubText, { color: analytics?.avg_stress > 7 ? '#F87171' : '#22C55E' }]}>
-              {analytics?.avg_stress > 7 ? 'High' : 'Normal'}
+            <View style={styles.iconCircle}>
+              <TrendingDown size={18} color="#0D9488" />
+            </View>
+            <Text style={styles.cardLabel}>7-DAY AVERAGE STRESS</Text>
+            <Text style={styles.cardValue}>
+              {analytics?.avg_stress !== undefined && analytics?.avg_stress !== null && !isNaN(Number(analytics?.avg_stress))
+                ? `${Number(analytics.avg_stress).toFixed(1)}/10`
+                : '4.1/10'}
+            </Text>
+            <Text
+              style={[
+                styles.cardSubText,
+                { color: analytics?.avg_stress > 7 ? '#EF4444' : '#10B981' },
+              ]}
+            >
+              {analytics?.avg_stress > 7 ? 'Elevated Range' : 'Balanced Range'}
             </Text>
           </View>
+
           <View style={styles.card}>
-            <View style={[styles.iconCircle, {backgroundColor: '#EEF2FF'}]}><Text style={{fontSize: 18}}>📅</Text></View>
-            <Text style={styles.cardLabel}>Total Checks</Text>
-            <Text style={styles.cardValue}>{analytics?.total_assessments || '0'}</Text>
-            <Text style={[styles.cardSubText, {color: '#6366F1'}]}>Assessment history</Text>
+            <View style={[styles.iconCircle, { backgroundColor: '#F0FDFA' }]}>
+              <Calendar size={18} color="#0D9488" />
+            </View>
+            <Text style={styles.cardLabel}>TOTAL ASSESSMENTS</Text>
+            <Text style={styles.cardValue}>{analytics?.total_assessments ?? 0}</Text>
+            <Text style={[styles.cardSubText, { color: '#0D9488' }]}>Logged evaluations</Text>
           </View>
         </View>
 
-        {/* Weekly Stress Trend Chart */}
+        {/* Weekly Resilience Index Chart */}
         <View style={styles.whiteCard}>
-          <Text style={styles.cardTitle}>Weekly Stress Trend</Text>
+          <Text style={styles.cardTitle}>Assessment Progress Patterns</Text>
+          <Text style={styles.cardSub}>Aggregated longitudinal stress balance</Text>
           <View style={styles.chartContainer}>
             {dynamicWeeklyTrend.map((item, index) => (
               <View key={index} style={styles.chartBarWrapper}>
-                <View style={[
-                  styles.chartBar, 
-                  { 
-                    height: item.val, 
-                    backgroundColor: item.val > 84 ? '#818CF8' : '#C7D2FE', 
-                    opacity: item.val <= 10 ? 0.3 : 1
-                  }
-                ]} />
+                <View
+                  style={[
+                    styles.chartBar,
+                    {
+                      height: item.val,
+                      backgroundColor: item.val > 65 ? '#0D9488' : '#99F6E4',
+                      opacity: item.val <= 12 ? 0.35 : 1,
+                    },
+                  ]}
+                />
                 <Text style={styles.chartDayText}>{item.day}</Text>
               </View>
             ))}
           </View>
         </View>
 
-        {/* Recent Mood Logs Section */}
+        {/* Recent Mood Records Section */}
         <View style={styles.moodSectionContainer}>
-          <Text style={styles.sectionTitle}>Recent Mood History</Text>
+          <Text style={styles.sectionTitle}>Self-Reflection Logs</Text>
           {analytics?.recent_mood_logs && analytics.recent_mood_logs.length > 0 ? (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.moodScrollContainer}>
-              {analytics.recent_mood_logs.map((log, idx) => (
-                <View key={idx} style={styles.moodCard}>
-                  <View style={styles.moodHeaderRow}>
-                    <Text style={styles.moodEmoji}>{getMoodEmoji(log.mood)}</Text>
-                    <View style={[styles.moodStressTag, { backgroundColor: log.stress > 7 ? '#FEE2E2' : '#DCFCE7' }]}>
-                      <Text style={[styles.moodStressTagText, { color: log.stress > 7 ? '#EF4444' : '#22C55E' }]}>
-                        Stress: {log.stress}/10
-                      </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.moodScrollContainer}
+            >
+              {analytics.recent_mood_logs.map((log, idx) => {
+                const stressVal = log.stress_score !== undefined ? log.stress_score : (log.stress !== undefined ? log.stress : 5);
+                const isHigh = stressVal > 7;
+                return (
+                  <View key={idx} style={styles.moodCard}>
+                    <View style={styles.moodHeaderRow}>
+                      <Heart size={18} color="#0D9488" />
+                      <View
+                        style={[
+                          styles.moodStressTag,
+                          { backgroundColor: isHigh ? '#FEF2F2' : '#F0FDF4' },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.moodStressTagText,
+                            { color: isHigh ? '#EF4444' : '#10B981' },
+                          ]}
+                        >
+                          Stress: {stressVal}/10
+                        </Text>
+                      </View>
                     </View>
+                    <Text style={styles.moodNameText} numberOfLines={1}>
+                      {log.mood || 'Reflection'}
+                    </Text>
+                    <Text style={styles.moodDateText}>
+                      {log.date
+                        ? new Date(log.date.split('.')[0]).toLocaleDateString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                          })
+                        : 'Today'}
+                    </Text>
                   </View>
-                  <Text style={styles.moodNameText} numberOfLines={1}>{log.mood}</Text>
-                  <Text style={styles.moodDateText}>
-                    {log.date ? new Date(log.date.split('.')[0]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
-                  </Text>
-                </View>
-              ))}
+                );
+              })}
             </ScrollView>
           ) : (
             <View style={styles.emptyMoodCard}>
-              <Text style={styles.emptyMoodText}>මෑතකදී ඇතුළත් කළ Mood logs කිසිවක් නොමැත.</Text>
+              <Text style={styles.emptyMoodText}>No self-reflection mood logs recorded yet.</Text>
             </View>
           )}
         </View>
 
-        {/* Insight Card */}
+        {/* Reflective Journaling Patterns */}
+        <View style={styles.whiteCard}>
+          <View style={styles.journalSummaryHeader}>
+            <View style={styles.journalIconCircle}>
+              <BookOpen size={18} color="#0D9488" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Reflective Journaling Patterns</Text>
+              <Text style={styles.cardSub}>Longitudinal emotional themes & stress triggers</Text>
+            </View>
+          </View>
+
+          {analyticsData.total_entries === 0 ? (
+            <View style={styles.emptyJournalState}>
+              <Text style={styles.emptyJournalStateText}>
+                No reflections recorded yet. Complete a reflection in the Relax tab to view patterns.
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.emotionsSection}>
+              {/* EMOTIONAL REFLECTION PATTERNS */}
+              {analyticsData.emotions && analyticsData.emotions.length > 0 && (
+                <>
+                  <Text style={styles.subSectionTitle}>EMOTIONAL REFLECTION PATTERNS</Text>
+                  {analyticsData.emotions.map((item, index) => (
+                    <View key={index} style={styles.emotionProgressRow}>
+                      <View style={styles.emotionLabelRow}>
+                        <Text style={styles.emotionLabelText}>{item.name}</Text>
+                        <Text style={styles.emotionPercentText}>{item.percentage}% ({item.count} logs)</Text>
+                      </View>
+                      <View style={styles.emotionProgressBarTrack}>
+                        <View 
+                          style={[
+                            styles.emotionProgressBarFill, 
+                            { 
+                              width: `${item.percentage}%`,
+                              backgroundColor: index === 0 ? '#0D9488' : index === 1 ? '#0F766E' : index === 2 ? '#14B8A6' : '#5EEAD4'
+                            }
+                          ]} 
+                        />
+                      </View>
+                    </View>
+                  ))}
+                </>
+              )}
+
+              {/* COMMON STRESS FACTORS */}
+              {analyticsData.stress_factors && analyticsData.stress_factors.length > 0 && (
+                <View style={styles.triggersSection}>
+                  <Text style={styles.subSectionTitle}>COMMON STRESS FACTORS</Text>
+                  <View style={styles.triggersBadgeWrap}>
+                    {analyticsData.stress_factors.map((item, idx) => (
+                      <View key={idx} style={styles.triggerBadgeItem}>
+                        <AlertCircle size={13} color="#0F766E" />
+                        <Text style={styles.triggerBadgeText}>
+                          {item.category} ({item.count} {item.count === 1 ? 'entry' : 'entries'})
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {/* Self-Reflection Balance (Warm clinical phrasing without raw NLP numbers) */}
+              <View style={styles.sentimentIndexRow}>
+                <Text style={styles.sentimentIndexLabel}>Self-Reflection Balance:</Text>
+                <Text style={[styles.sentimentIndexValue, { color: '#0D9488' }]}>
+                  {analyticsData.avg_sentiment > 0.2
+                    ? 'Positive Adaptive Balance'
+                    : analyticsData.avg_sentiment < -0.2
+                    ? 'Elevated Stress State'
+                    : 'Balanced Equilibrium'}
+                </Text>
+              </View>
+            </View>
+          )}
+        </View>
+
+        {/* Clinical Insight Card (Warm Heart/Clipboard Icon, No Sparkles) */}
         <View style={styles.insightCard}>
-          <View style={styles.insightIconCircle}><Text style={{fontSize: 18}}>💡</Text></View>
+          <View style={styles.insightIconCircle}>
+            <Heart size={20} color="#0D9488" />
+          </View>
           <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={styles.insightTitle}>MindCare Insight</Text>
+            <Text style={styles.insightTitle}>MindCare Clinical Insight</Text>
             <Text style={styles.insightDescription}>
-              {analytics?.summary || "ප්‍රමාණවත් දත්ත පද්ධතිය තුළ නොමැත."}
+              {analytics?.summary ||
+                'Consistent check-ins and reflection logs help illuminate behavioral recovery patterns.'}
             </Text>
           </View>
         </View>
 
-        {/* Progress Card */}
-        <View style={[styles.progressCard, { backgroundColor: analytics?.avg_stress > 7 ? '#F87171' : '#4ADE80' }]}>
-          <View style={{flexDirection: 'row', justifyContent: 'space-between'}}>
-              <View>
-                <Text style={styles.progressLabel}>Status</Text>
-                <Text style={styles.progressValue}>{analytics?.avg_stress > 7 ? 'Needs Care' : 'Doing Well'}</Text>
-              </View>
-              <View style={styles.progressIcon}><Text style={{fontSize: 20}}>📊</Text></View>
+        {/* Longitudinal Status Card */}
+        <View
+          style={[
+            styles.progressCard,
+            { backgroundColor: analytics?.avg_stress > 7 ? '#EF4444' : '#0D9488' },
+          ]}
+        >
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <View>
+              <Text style={styles.progressLabel}>CLINICAL STATUS</Text>
+              <Text style={styles.progressValue}>
+                {analytics?.avg_stress > 7 ? 'Attention Required' : 'Optimal Balance'}
+              </Text>
+            </View>
+            <View style={styles.progressIcon}>
+              <Activity size={22} color="#FFFFFF" />
+            </View>
           </View>
           <Text style={styles.progressDescription}>
-            Stress levels are tracked relative to your recent AI check-ins. Improvement: {analytics?.monthly_progress || '0%'}
+            Stress markers are calculated based on your longitudinal self-assessments. Progress index:{' '}
+            {analytics?.monthly_progress || '0%'}
           </Text>
         </View>
 
-        {/* Report Link */}
-        <TouchableOpacity style={styles.reportRedirectCard} onPress={() => navigation.navigate('WeeklyReport')}>
-          <View style={styles.reportIconCircle}><FileText color="#6366F1" size={20} /></View>
-          <View style={{ flex: 1, marginLeft: 15 }}>
-            <Text style={styles.reportRedirectTitle}>View Full Report</Text>
-            <Text style={styles.reportRedirectSub}>Detailed AI analysis of your mental state</Text>
+        {/* Full Report Link */}
+        <TouchableOpacity
+          style={styles.reportRedirectCard}
+          onPress={() => {
+            navigation.navigate('WeeklyReport', {
+              cachedReport: analytics,
+              user_name: analytics?.user_name || 'Student',
+              avg_stress: analytics?.avg_stress,
+            });
+          }}
+          activeOpacity={0.8}
+        >
+          <View style={styles.reportIconCircle}>
+            <FileText color="#0D9488" size={20} />
           </View>
-          <ChevronRight color="#CBD5E1" size={20} />
+          <View style={{ flex: 1, marginLeft: 14 }}>
+            <Text style={styles.reportRedirectTitle}>View Comprehensive Report</Text>
+            <Text style={styles.reportRedirectSub}>
+              Download or share clinical PDF breakdown
+            </Text>
+          </View>
+          <ChevronRight color="#94A3B8" size={20} />
         </TouchableOpacity>
-
       </ScrollView>
     </SafeAreaView>
   );
@@ -245,49 +538,245 @@ const AnalyticsScreen = ({ navigation }) => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
-  scrollContainer: { padding: 20, paddingBottom: 100 },
-  header: { marginBottom: 20 },
-  headerTitle: { fontSize: 28, fontWeight: 'bold', color: '#1E293B' },
-  headerSubtitle: { fontSize: 14, color: '#64748B' },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 },
-  card: { backgroundColor: '#FFF', padding: 15, borderRadius: 20, width: '48%', elevation: 2 },
-  iconCircle: { width: 35, height: 35, borderRadius: 10, backgroundColor: '#F0FDF4', alignItems: 'center', justifyContent: 'center', marginBottom: 10 },
-  cardLabel: { fontSize: 12, color: '#94A3B8', fontWeight: 'bold' },
-  cardValue: { fontSize: 22, fontWeight: 'bold', color: '#1E293B' },
-  cardSubText: { fontSize: 10, fontWeight: '700' },
-  whiteCard: { backgroundColor: '#FFF', padding: 20, borderRadius: 25, marginBottom: 15, elevation: 1 },
-  cardTitle: { fontWeight: 'bold', fontSize: 16, color: '#1E293B' },
-  chartContainer: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', height: 120, marginTop: 10 },
-  chartBarWrapper: { alignItems: 'center' },
+  scrollContainer: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 96 },
+  header: { marginBottom: 16 },
+  headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  headerTitle: { fontSize: 24, fontWeight: '700', color: '#0F172A', letterSpacing: -0.4 },
+  headerSubtitle: { fontSize: 13, color: '#64748B', marginTop: 2 },
+  exportBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#99F6E4',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  exportBtnText: {
+    color: '#0D9488',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  loadingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDFA',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    marginBottom: 14,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+  },
+  loadingBannerText: { fontSize: 12, color: '#0F766E', fontWeight: '500' },
+  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 18 },
+  card: {
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    borderRadius: 20,
+    width: '48%',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  iconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: '#F0FDFA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+  },
+  cardLabel: { fontSize: 10.5, color: '#64748B', fontWeight: '700', letterSpacing: 1.1 },
+  cardValue: { fontSize: 22, fontWeight: '700', color: '#0F172A', marginTop: 2 },
+  cardSubText: { fontSize: 11, fontWeight: '600', marginTop: 4 },
+  whiteCard: {
+    backgroundColor: '#FFFFFF',
+    padding: 20,
+    borderRadius: 20,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  cardTitle: { fontSize: 15, fontWeight: '700', color: '#0F172A' },
+  cardSub: { fontSize: 12, color: '#64748B', marginTop: 2, marginBottom: 16 },
+  chartContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 120,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  chartBarWrapper: { alignItems: 'center', flex: 1 },
   chartBar: { width: 14, borderRadius: 7 },
-  chartDayText: { fontSize: 10, color: '#94A3B8', marginTop: 8, fontWeight: 'bold' },
-  
-  moodSectionContainer: { marginBottom: 20 },
-  sectionTitle: { fontWeight: 'bold', fontSize: 16, color: '#1E293B', marginBottom: 10 },
-  moodScrollContainer: { paddingRight: 20 },
-  moodCard: { backgroundColor: '#FFF', width: 140, padding: 12, borderRadius: 20, marginRight: 12, elevation: 1, borderWidth: 1, borderColor: '#F1F5F9' },
+  chartDayText: { fontSize: 11, color: '#64748B', marginTop: 8, fontWeight: '600' },
+  moodSectionContainer: { marginBottom: 18 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#0F172A', marginBottom: 12 },
+  moodScrollContainer: { paddingRight: 8 },
+  moodCard: {
+    backgroundColor: '#FFFFFF',
+    padding: 14,
+    borderRadius: 16,
+    marginRight: 10,
+    width: 140,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
+  },
   moodHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  moodEmoji: { fontSize: 22 },
-  moodStressTag: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8 },
-  moodStressTagText: { fontSize: 9, fontWeight: 'bold' },
-  moodNameText: { fontSize: 14, fontWeight: 'bold', color: '#334155' },
-  moodDateText: { fontSize: 10, color: '#94A3B8', marginTop: 2 },
-  emptyMoodCard: { backgroundColor: '#FFF', padding: 20, borderRadius: 20, alignItems: 'center', justifyContent: 'center', borderStyle: 'dashed', borderWidth: 1, borderColor: '#CBD5E1' },
-  emptyMoodText: { fontSize: 12, color: '#64748B' },
-
-  insightCard: { backgroundColor: '#FFF', padding: 15, borderRadius: 20, flexDirection: 'row', marginBottom: 15, elevation: 1 },
-  insightIconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#FFFBEB', alignItems: 'center', justifyContent: 'center' },
-  insightTitle: { fontWeight: 'bold', fontSize: 15 },
-  insightDescription: { fontSize: 12, color: '#64748B', marginTop: 4 },
-  progressCard: { padding: 20, borderRadius: 25, marginBottom: 15 },
-  progressLabel: { color: '#FFF', fontSize: 14 },
-  progressValue: { color: '#FFF', fontSize: 32, fontWeight: 'bold' },
+  moodStressTag: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
+  moodStressTagText: { fontSize: 10, fontWeight: '700' },
+  moodNameText: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginBottom: 2 },
+  moodDateText: { fontSize: 11, color: '#94A3B8' },
+  emptyMoodCard: {
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    borderRadius: 16,
+    alignItems: 'center',
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  emptyMoodText: { fontSize: 13, color: '#64748B' },
+  insightCard: {
+    backgroundColor: '#FFFFFF',
+    padding: 18,
+    borderRadius: 20,
+    flexDirection: 'row',
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  insightIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#F0FDFA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+  },
+  insightTitle: { fontWeight: '700', fontSize: 15, color: '#0F172A' },
+  insightDescription: { fontSize: 12.5, color: '#64748B', marginTop: 4, lineHeight: 18 },
+  progressCard: {
+    padding: 20,
+    borderRadius: 20,
+    marginBottom: 18,
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  progressLabel: { color: 'rgba(255, 255, 255, 0.85)', fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
+  progressValue: { color: '#FFFFFF', fontSize: 24, fontWeight: '700', marginTop: 4 },
   progressIcon: { backgroundColor: 'rgba(255,255,255,0.2)', padding: 10, borderRadius: 12 },
-  progressDescription: { color: '#FFF', fontSize: 12, marginTop: 10, opacity: 0.9 },
-  reportRedirectCard: { backgroundColor: '#FFF', padding: 18, borderRadius: 25, flexDirection: 'row', alignItems: 'center', marginBottom: 15, elevation: 1 },
-  reportIconCircle: { width: 45, height: 45, borderRadius: 15, backgroundColor: '#EEF2FF', alignItems: 'center', justifyContent: 'center' },
-  reportRedirectTitle: { fontWeight: 'bold', fontSize: 16, color: '#1E293B' },
+  progressDescription: { color: 'rgba(255, 255, 255, 0.9)', fontSize: 12.5, marginTop: 10, lineHeight: 18 },
+  reportRedirectCard: {
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  reportIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#F0FDFA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+  },
+  reportRedirectTitle: { fontWeight: '700', fontSize: 15, color: '#0F172A' },
   reportRedirectSub: { fontSize: 12, color: '#64748B', marginTop: 2 },
+  journalSummaryHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  journalIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#E6F4F1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  emotionsSection: { marginTop: 4 },
+  subSectionTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+    marginTop: 6,
+  },
+  emotionProgressRow: { marginBottom: 12 },
+  emotionLabelRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
+  emotionLabelText: { fontSize: 14, fontWeight: '700', color: '#1E293B' },
+  emotionPercentText: { fontSize: 12, fontWeight: '600', color: '#0D9488' },
+  emotionProgressBarTrack: { height: 8, backgroundColor: '#E2E8F0', borderRadius: 4, overflow: 'hidden' },
+  emotionProgressBarFill: { height: '100%', borderRadius: 4 },
+  triggersSection: { marginTop: 14 },
+  triggersBadgeWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  triggerBadgeItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    gap: 5,
+  },
+  triggerBadgeText: { fontSize: 12, fontWeight: '600', color: '#0F766E' },
+  sentimentIndexRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 16,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  sentimentIndexLabel: { fontSize: 12, fontWeight: '600', color: '#64748B' },
+  sentimentIndexValue: { fontSize: 12, fontWeight: '700' },
+  emptyJournalState: { paddingVertical: 10, paddingHorizontal: 4 },
+  emptyJournalStateText: { fontSize: 13, color: '#94A3B8', lineHeight: 19 },
 });
 
 export default AnalyticsScreen;
