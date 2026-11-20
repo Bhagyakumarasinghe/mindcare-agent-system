@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,7 @@ import {
   ClipboardList,
   Download,
 } from 'lucide-react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { getUserSummary, getJournalSummary, getUserProfile } from '../api/authService';
@@ -33,9 +34,15 @@ import { generateClinicalHTMLReport } from '../utils/clinicalReportPdf';
 let cachedAnalytics = null;
 let cachedJournalSummary = null;
 
+export const invalidateAnalyticsCache = () => {
+  cachedAnalytics = null;
+  cachedJournalSummary = null;
+};
+
 const AnalyticsScreen = ({ navigation }) => {
   const [analytics, setAnalytics] = useState(cachedAnalytics);
   const [journalSummary, setJournalSummary] = useState(cachedJournalSummary);
+  const [latestBiometrics, setLatestBiometrics] = useState(null);
   const [loading, setLoading] = useState(!cachedAnalytics);
   const [refreshing, setRefreshing] = useState(false);
   const [isNavigatingReport, setIsNavigatingReport] = useState(false);
@@ -47,10 +54,42 @@ const AnalyticsScreen = ({ navigation }) => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
 
+    // Invalidate module-level cache if a recent mood log flagged it as stale
+    try {
+      const isStale = await AsyncStorage.getItem('@mindcare_analytics_cache_stale');
+      if (isStale) {
+        cachedAnalytics = null;
+        cachedJournalSummary = null;
+        await AsyncStorage.removeItem('@mindcare_analytics_cache_stale');
+      }
+    } catch (e) {
+      // ignore
+    }
+
     if (isManualRefresh) {
       setRefreshing(true);
     } else if (!cachedAnalytics) {
       setLoading(true);
+    }
+
+    // Sync latest local biometrics cache immediately before network round-trips
+    try {
+      const cachedProfile = await AsyncStorage.getItem('@mindcare_cached_profile');
+      let quickUid = '';
+      if (cachedProfile) {
+        const p = JSON.parse(cachedProfile);
+        quickUid = p.id || p.user_id || '';
+      }
+      const [scopedBio, globalBio] = await Promise.all([
+        quickUid ? AsyncStorage.getItem(`@mindcare_latest_biometrics_${quickUid}`) : null,
+        AsyncStorage.getItem('@mindcare_latest_biometrics'),
+      ]);
+      const bioRaw = scopedBio || globalBio;
+      if (bioRaw) {
+        setLatestBiometrics(JSON.parse(bioRaw));
+      }
+    } catch (e) {
+      // ignore
     }
 
     try {
@@ -64,6 +103,18 @@ const AnalyticsScreen = ({ navigation }) => {
       if (profileResult.status === 'fulfilled' && profileResult.value?.data) {
         const pData = profileResult.value.data;
         activeUserId = pData.id || pData._id || pData.user_id || 'demo_user';
+      }
+
+      // Re-check scoped biometrics with resolved user ID
+      try {
+        const scopedBio = activeUserId
+          ? await AsyncStorage.getItem(`@mindcare_latest_biometrics_${activeUserId}`)
+          : null;
+        if (scopedBio) {
+          setLatestBiometrics(JSON.parse(scopedBio));
+        }
+      } catch (bioErr) {
+        // ignore
       }
 
       if (summaryResult.status === 'fulfilled' && summaryResult.value?.data) {
@@ -83,7 +134,7 @@ const AnalyticsScreen = ({ navigation }) => {
         console.log('Journal summary fetch note:', journalErr.message || journalErr);
       }
     } catch (error) {
-      console.error('Analytics load error:', error.message || error);
+      console.warn('Analytics load notice:', error.message || error);
     } finally {
       isFetchingRef.current = false;
       setLoading(false);
@@ -105,8 +156,8 @@ const AnalyticsScreen = ({ navigation }) => {
     loadData(true);
   };
 
-  // Map assessment history and recent mood logs into 7-day weekly metrics
-  const mapHistoryToWeeklyTrend = (history, recentMoods) => {
+  // Map clinical assessment history and recent mood check-ins into 7-day weekly metrics
+  const mapHistoryToWeeklyTrend = (history, recentMoodLogs, localBio) => {
     const weeklyMap = [
       { day: 'Mon', val: 0, count: 0 },
       { day: 'Tue', val: 0, count: 0 },
@@ -133,31 +184,41 @@ const AnalyticsScreen = ({ navigation }) => {
       });
     }
 
-    if (recentMoods && recentMoods.length > 0) {
-      recentMoods.forEach((entry) => {
-        const rawStress = entry.stress_score !== undefined ? entry.stress_score : entry.stress;
-        if (entry.date && rawStress !== undefined && rawStress !== null) {
-          const cleanDate = entry.date.split('.')[0].replace('Z', '');
+    // Blend recent mood logs into the 7-day trend
+    const moodToStress = { Great: 2.0, Good: 3.5, Okay: 5.0, Bad: 7.5, Terrible: 9.0 };
+    if (recentMoodLogs && Array.isArray(recentMoodLogs) && recentMoodLogs.length > 0) {
+      recentMoodLogs.forEach((log) => {
+        const rawDate = log.date || log.timestamp;
+        if (rawDate) {
+          const cleanDate = typeof rawDate === 'string' ? rawDate.split('.')[0].replace('Z', '') : rawDate;
           const dateObj = new Date(cleanDate);
           if (!isNaN(dateObj.getTime())) {
             let dayIdx = dateObj.getDay();
             let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-            const safeStress = rawStress > 10 ? 10 : rawStress;
-            weeklyMap[adjustedIdx].val += safeStress;
+            let stressVal = log.stress_score ?? log.stress_level;
+            if (stressVal === null || stressVal === undefined) {
+              stressVal = moodToStress[log.mood] ?? 5.0;
+            }
+            const safeScore = Math.min(10, Math.max(1, Number(stressVal)));
+            weeklyMap[adjustedIdx].val += safeScore;
             weeklyMap[adjustedIdx].count += 1;
           }
         }
       });
+    }
 
-      // Dynamically ensure the current day's bar renders the latest mood stress score
-      const latestMood = recentMoods[0];
-      const latestScore = latestMood?.stress_score !== undefined ? latestMood.stress_score : latestMood?.stress;
-      if (latestScore !== undefined && latestScore !== null) {
-        const todayIdx = new Date().getDay();
-        const adjustedTodayIdx = todayIdx === 0 ? 6 : todayIdx - 1;
-        weeklyMap[adjustedTodayIdx].val = latestScore;
-        weeklyMap[adjustedTodayIdx].count = 1;
+    // Blend local latestBiometrics if available for today
+    if (localBio) {
+      const today = new Date();
+      let dayIdx = today.getDay();
+      let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
+      let stressVal = localBio.stress_score ?? localBio.stress_level;
+      if (stressVal === null || stressVal === undefined) {
+        stressVal = moodToStress[localBio.mood] ?? 5.0;
       }
+      const safeScore = Math.min(10, Math.max(1, Number(stressVal)));
+      weeklyMap[adjustedIdx].val += safeScore;
+      weeklyMap[adjustedIdx].count += 1;
     }
 
     const hasData = weeklyMap.some((item) => item.count > 0);
@@ -176,13 +237,48 @@ const AnalyticsScreen = ({ navigation }) => {
 
   const dynamicWeeklyTrend = mapHistoryToWeeklyTrend(
     analytics?.history,
-    analytics?.recent_mood_logs
+    analytics?.recent_mood_logs,
+    latestBiometrics
   );
+
+  // Blend local biometrics with recent_mood_logs for immediate rendering
+  const displayMoodLogs = useMemo(() => {
+    const list = [...(analytics?.recent_mood_logs || [])];
+    if (latestBiometrics) {
+      const bioDate = latestBiometrics.date || latestBiometrics.timestamp || new Date().toISOString();
+      const alreadyIncluded = list.some(
+        (m) => (m.date && m.date === bioDate) || (m.timestamp && m.timestamp === bioDate) || (m.mood === latestBiometrics.mood && Math.abs(new Date(m.date || m.timestamp || 0) - new Date(bioDate)) < 60000)
+      );
+      if (!alreadyIncluded) {
+        list.unshift({
+          ...latestBiometrics,
+          date: bioDate,
+        });
+      }
+    }
+    return list;
+  }, [analytics?.recent_mood_logs, latestBiometrics]);
+
+  const fallbackHolistic = [
+    { day: 'Mon', val: 14, score: 0, has_data: false },
+    { day: 'Tue', val: 14, score: 0, has_data: false },
+    { day: 'Wed', val: 14, score: 0, has_data: false },
+    { day: 'Thu', val: 14, score: 0, has_data: false },
+    { day: 'Fri', val: 14, score: 0, has_data: false },
+    { day: 'Sat', val: 14, score: 0, has_data: false },
+    { day: 'Sun', val: 14, score: 0, has_data: false },
+  ];
+  const holisticTrend =
+    analytics?.holistic_wellness_trend && Array.isArray(analytics.holistic_wellness_trend) && analytics.holistic_wellness_trend.length === 7
+      ? analytics.holistic_wellness_trend
+      : fallbackHolistic;
 
   const analyticsData = {
     emotions: journalSummary?.emotions || journalSummary?.emotion_distribution || [],
     stress_factors: journalSummary?.stress_factors || journalSummary?.top_triggers || [],
-    total_entries: journalSummary?.total_entries ?? 0,
+    total_entries:
+      journalSummary?.total_entries ??
+      (displayMoodLogs?.length || 0),
     avg_sentiment: journalSummary?.avg_sentiment ?? 0.0,
   };
 
@@ -213,15 +309,15 @@ const AnalyticsScreen = ({ navigation }) => {
         user_name: analytics?.user_name || 'Student',
         patient_id: analytics?.patient_id || 'MC-10492',
         avg_stress: dynamicStress,
-        avg_sleep: analytics?.avg_sleep ?? 7.0,
+        avg_sleep: latestBiometrics?.sleep_hours ?? analytics?.sleep_hours ?? analytics?.avg_sleep ?? 7.0,
         study_hours: analytics?.study_hours ?? 5.5,
         common_trigger: primaryTrigger,
         trigger_percentage: triggerPercentage,
         variance: analytics?.variance ?? 0,
         is_baseline: analytics?.is_baseline ?? true,
-        recent_mood_logs: analytics?.recent_mood_logs || [],
+        recent_mood_logs: displayMoodLogs,
         activity_summary: {
-          mood_count: analytics?.recent_mood_logs?.length ?? (analytics?.total_entries ?? 0),
+          mood_count: displayMoodLogs?.length ?? (analytics?.total_entries ?? 0),
           support_count: analytics?.total_chats ?? 0,
           assessment_count: analytics?.total_assessments ?? 0,
           relaxation_count: analytics?.total_relaxations ?? 0,
@@ -233,7 +329,7 @@ const AnalyticsScreen = ({ navigation }) => {
     } catch (error) {
       const msg = error?.message || '';
       if (!msg.toLowerCase().includes('cancel') && !msg.toLowerCase().includes('dismiss')) {
-        console.error('PDF Generation Error:', error);
+        console.warn('PDF Generation Error:', error);
         Alert.alert('Export Error', 'Unable to generate PDF report: ' + msg);
       }
     } finally {
@@ -338,18 +434,44 @@ const AnalyticsScreen = ({ navigation }) => {
           </View>
         </View>
 
+        {/* Mood & Lifestyle Tracking Section Divider & Header */}
+        <View style={styles.sectionDividerWrap}>
+          <View style={styles.sectionDividerLine} />
+          <View style={styles.sectionTitleBlock}>
+            <Text style={styles.sectionMainTitle}>Mood & Lifestyle Tracking</Text>
+            <Text style={styles.sectionMainSubtitle}>
+              Daily affect, energy, sleep & trigger patterns
+            </Text>
+          </View>
+        </View>
+
         {/* Recent Mood Records Section */}
         <View style={styles.moodSectionContainer}>
           <Text style={styles.sectionTitle}>Self-Reflection Logs</Text>
-          {analytics?.recent_mood_logs && analytics.recent_mood_logs.length > 0 ? (
+          {displayMoodLogs && displayMoodLogs.length > 0 ? (
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.moodScrollContainer}
             >
-              {analytics.recent_mood_logs.map((log, idx) => {
-                const stressVal = log.stress_score !== undefined ? log.stress_score : (log.stress !== undefined ? log.stress : 5);
-                const isHigh = stressVal > 7;
+              {displayMoodLogs.map((log, idx) => {
+                const energyLabel = log.energy_level ? `${log.energy_level} Energy` : 'Steady Energy';
+
+                const rawDate = log.date || log.timestamp;
+                const dateStr = rawDate
+                  ? new Date(rawDate.split('.')[0].replace('Z', '')).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                    })
+                  : 'Today';
+
+                const emotionLabel =
+                  log.emotion_tags && Array.isArray(log.emotion_tags) && log.emotion_tags.length > 0
+                    ? log.emotion_tags[0]
+                    : null;
+
+                const subtitle = emotionLabel ? `${emotionLabel} • ${dateStr}` : dateStr;
+
                 return (
                   <View key={idx} style={styles.moodCard}>
                     <View style={styles.moodHeaderRow}>
@@ -357,30 +479,46 @@ const AnalyticsScreen = ({ navigation }) => {
                       <View
                         style={[
                           styles.moodStressTag,
-                          { backgroundColor: isHigh ? '#FEF2F2' : '#F0FDF4' },
+                          {
+                            backgroundColor: 'rgba(13, 148, 136, 0.12)',
+                            borderColor: '#CCFBF1',
+                            borderWidth: 1,
+                          },
                         ]}
                       >
                         <Text
                           style={[
                             styles.moodStressTagText,
-                            { color: isHigh ? '#EF4444' : '#10B981' },
+                            { color: '#0D9488' },
                           ]}
+                          numberOfLines={1}
                         >
-                          Stress: {stressVal}/10
+                          {energyLabel}
                         </Text>
                       </View>
                     </View>
                     <Text style={styles.moodNameText} numberOfLines={1}>
                       {log.mood || 'Reflection'}
                     </Text>
-                    <Text style={styles.moodDateText}>
-                      {log.date
-                        ? new Date(log.date.split('.')[0]).toLocaleDateString('en-US', {
-                            month: 'short',
-                            day: 'numeric',
-                          })
-                        : 'Today'}
+                    <Text style={styles.moodDateText} numberOfLines={1}>
+                      {subtitle}
                     </Text>
+                    {log.sleep_hours !== undefined && log.sleep_hours !== null && (
+                      <View style={styles.moodMetaFooterRow}>
+                        <View style={styles.moodMetaChip}>
+                          <Text style={styles.moodMetaChipText}>
+                            {typeof log.sleep_hours === 'number' ? log.sleep_hours.toFixed(1) : log.sleep_hours}h rest
+                          </Text>
+                        </View>
+                        {log.stress_factors && Array.isArray(log.stress_factors) && log.stress_factors.length > 0 && log.stress_factors[0] !== 'None' && (
+                          <View style={[styles.moodMetaChip, { backgroundColor: '#F1F5F9', borderColor: '#E2E8F0' }]}>
+                            <Text style={[styles.moodMetaChipText, { color: '#475569' }]} numberOfLines={1}>
+                              {log.stress_factors[0]}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
                   </View>
                 );
               })}
@@ -392,22 +530,22 @@ const AnalyticsScreen = ({ navigation }) => {
           )}
         </View>
 
-        {/* Reflective Journaling Patterns */}
+        {/* Mood & Trigger Insights */}
         <View style={styles.whiteCard}>
           <View style={styles.journalSummaryHeader}>
             <View style={styles.journalIconCircle}>
               <BookOpen size={18} color="#0D9488" />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Reflective Journaling Patterns</Text>
+              <Text style={styles.cardTitle}>Mood & Trigger Insights</Text>
               <Text style={styles.cardSub}>Longitudinal emotional themes & stress triggers</Text>
             </View>
           </View>
 
-          {analyticsData.total_entries === 0 ? (
+          {analyticsData.total_entries === 0 && (!analyticsData.emotions || analyticsData.emotions.length === 0) ? (
             <View style={styles.emptyJournalState}>
               <Text style={styles.emptyJournalStateText}>
-                No reflections recorded yet. Complete a reflection in the Relax tab to view patterns.
+                No mood check-ins or reflection logs recorded yet.
               </Text>
             </View>
           ) : (
@@ -468,6 +606,51 @@ const AnalyticsScreen = ({ navigation }) => {
               </View>
             </View>
           )}
+        </View>
+
+        {/* Unified Holistic Wellness Index Chart */}
+        <View style={styles.holisticCard}>
+          <View style={styles.holisticHeaderRow}>
+            <View style={styles.holisticIconCircle}>
+              <Activity size={18} color="#0D9488" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.cardTitle}>Holistic Wellness Index</Text>
+              <Text style={styles.cardSub}>Combined daily score from Assessments, Mood, Sleep & Self-Care</Text>
+            </View>
+            {analytics?.avg_wellness_index !== undefined && (
+              <View style={styles.holisticAvgBadge}>
+                <Text style={styles.holisticAvgBadgeText}>{Math.round(analytics.avg_wellness_index)}/100</Text>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.chartContainer}>
+            {holisticTrend.map((item, index) => {
+              const barHeight = Math.max(14, Math.min(100, item.val));
+              const hasData = item.has_data !== false && item.val > 14;
+              return (
+                <View key={index} style={styles.chartBarWrapper}>
+                  {hasData && (
+                    <Text style={styles.holisticBarScoreText}>
+                      {Math.round(item.score || item.val)}
+                    </Text>
+                  )}
+                  <View
+                    style={[
+                      styles.chartBar,
+                      {
+                        height: barHeight,
+                        backgroundColor: '#0D9488',
+                        opacity: hasData ? 1 : 0.28,
+                      },
+                    ]}
+                  />
+                  <Text style={styles.chartDayText}>{item.day}</Text>
+                </View>
+              );
+            })}
+          </View>
         </View>
 
         {/* Clinical Insight Card (Warm Heart/Clipboard Icon, No Sparkles) */}
@@ -633,7 +816,7 @@ const styles = StyleSheet.create({
     padding: 14,
     borderRadius: 16,
     marginRight: 10,
-    width: 140,
+    width: 152,
     borderWidth: 1,
     borderColor: '#E2E8F0',
     shadowColor: '#64748B',
@@ -643,10 +826,30 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   moodHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  moodStressTag: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
+  moodStressTag: { paddingHorizontal: 7, paddingVertical: 2.5, borderRadius: 8 },
   moodStressTagText: { fontSize: 10, fontWeight: '700' },
   moodNameText: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginBottom: 2 },
-  moodDateText: { fontSize: 11, color: '#94A3B8' },
+  moodDateText: { fontSize: 11, color: '#64748B', fontWeight: '500' },
+  moodMetaFooterRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 8,
+  },
+  moodMetaChip: {
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    maxWidth: 120,
+  },
+  moodMetaChipText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#0D9488',
+  },
   emptyMoodCard: {
     backgroundColor: '#FFFFFF',
     padding: 16,
@@ -657,6 +860,81 @@ const styles = StyleSheet.create({
     borderColor: '#CBD5E1',
   },
   emptyMoodText: { fontSize: 13, color: '#64748B' },
+
+  // Section Divider for Mood & Lifestyle Tracking
+  sectionDividerWrap: {
+    marginTop: 6,
+    marginBottom: 16,
+  },
+  sectionDividerLine: {
+    height: 1,
+    backgroundColor: '#E2E8F0',
+    marginBottom: 14,
+  },
+  sectionTitleBlock: {
+    marginBottom: 2,
+  },
+  sectionMainTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0F172A',
+    letterSpacing: -0.3,
+  },
+  sectionMainSubtitle: {
+    fontSize: 12.5,
+    color: '#64748B',
+    marginTop: 2,
+  },
+
+  // Holistic Wellness Index Card
+  holisticCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    padding: 18,
+    borderRadius: 24,
+    marginBottom: 18,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  holisticHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  holisticIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  holisticAvgBadge: {
+    backgroundColor: '#F0FDFA',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#99F6E4',
+  },
+  holisticAvgBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0D9488',
+  },
+  holisticBarScoreText: {
+    fontSize: 9.5,
+    fontWeight: '700',
+    color: '#0D9488',
+    marginBottom: 4,
+  },
+
   insightCard: {
     backgroundColor: '#FFFFFF',
     padding: 18,

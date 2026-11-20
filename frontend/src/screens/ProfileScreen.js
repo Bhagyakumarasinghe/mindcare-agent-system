@@ -183,7 +183,7 @@ export default function ProfileScreen({ navigation }) {
             } catch (e) {
               // Proceed with local logout regardless of network
             }
-            await AsyncStorage.removeItem('userToken');
+            await AsyncStorage.multiRemove(['userToken', '@mindcare_cached_profile']);
             navigation.replace('Login');
           } 
         }

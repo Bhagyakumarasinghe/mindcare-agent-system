@@ -1,58 +1,82 @@
 import os
+import logging
 from google import genai
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+logger = logging.getLogger("mindcare.orchestrator")
 
-def route_user_intent(user_input):
+def route_user_intent(user_input: str) -> str:
     """
-    Classifies the user's intent to route the request to the correct AI Agent.
+    Classifies the user's intent to route to the appropriate specialized agent:
+    - 'CBT_REFRAME': Cognitive distortions, catastrophic thinking, academic panic, imposter syndrome, deadline pressure.
+    - 'ASSESSMENT_MEMORY': Questions about past assessment scores, PSS-8 results, mental health test scores.
+    - 'INSIGHT': Longitudinal patterns, sleep trends, stress history, mood evolution, wellness trajectory.
+    - 'THERAPY': General emotional decompression, active listening, mindfulness, open dialogue.
     """
-    
-    # Using the latest Gemini model as per your configuration
-    selected_model = "gemini-3.1-flash-lite-preview"
+    api_key = os.getenv("GEMINI_API_KEY")
+    clean_input = str(user_input or "").strip()
+    if not clean_input:
+        return "THERAPY"
+
+    lower = clean_input.lower()
+
+    # Fast-path keyword routing: immediate zero-latency return for common student distress/chat inputs
+    # Avoids making an unnecessary extra Gemini network roundtrip and eliminates TimeoutError
+    fast_path_therapy = [
+        "stress", "work", "exam", "deadline", "sleep", "anxious", "tired",
+        "help", "score", "history", "sad", "hello", "hi", "hey", "feeling",
+        "worried", "exhausted", "burnout", "overwhelmed", "assignment", "study"
+    ]
+    if any(k in lower for k in fast_path_therapy):
+        return "THERAPY"
+
+    # Specific memory or insight queries
+    if any(k in lower for k in ["last score", "assessment score", "pss", "previous test", "test result"]):
+        return "ASSESSMENT_MEMORY"
+    if any(k in lower for k in ["trend", "progress report", "mood pattern", "trajectory", "sleep history"]):
+        return "INSIGHT"
+
+    if not api_key:
+        return "THERAPY"
+
+    selected_model = "gemini-flash-lite-latest"
 
     prompt_text = f"""
-    You are an AI Orchestrator for MindCare, a Mental Health Support App for Sri Lankan students.
-    Your job is to classify the user's intent based on their message.
+    You are the Central AI Orchestrator for MindCare, a clinical mental health companion for university students in Sri Lanka.
+    Classify the following user message into EXACTLY ONE category:
+
+    1. 'CBT_REFRAME': User is catastrophizing, expressing severe self-doubt, exam anxiety, deadline panic, imposter syndrome, or irrational negative thoughts needing cognitive restructuring.
+    2. 'ASSESSMENT_MEMORY': User is specifically asking about their past assessment scores, previous check-in tests, diagnostic results, PSS-8 scores, or how they performed in their last test.
+    3. 'INSIGHT': User is asking about their longitudinal mood patterns, sleep history trends, weekly/monthly stress progress, or overall wellness trajectory.
+    4. 'THERAPY': User is venting, seeking general emotional support, mindfulness guidance, relaxation tips, or conversational decompression.
 
     User Message: "{user_input}"
 
-    Categories:
-    1. 'ASSESSMENT': Use this ONLY if the user wants to start a NEW mental health test, begins a fresh check-in, or explicitly asks for a diagnostic quiz.
-    2. 'THERAPY': Use this if the user is discussing feelings, problems (like exam stress), or ASKING ABOUT PREVIOUS ASSESSMENT RESULTS, past scores, or their history. 
-
-    Special Logic:
-    - If the user mentions "last assessment," "previous score," or "what did I mention before," categorize as 'THERAPY' so the Profiling Agent can retrieve their memory.
-    - Do NOT trigger 'ASSESSMENT' for questions about past data.
-
-    Response Rules:
-    - Respond with ONLY the word 'ASSESSMENT' or 'THERAPY'.
-    - Do not include any other text or punctuation.
+    Rules:
+    - Respond with ONLY the category word ('CBT_REFRAME', 'ASSESSMENT_MEMORY', 'INSIGHT', or 'THERAPY').
+    - Do not output any other punctuation or words.
     """
 
     try:
+        client = genai.Client(api_key=api_key, http_options={'timeout': 30000})
         response = client.models.generate_content(
             model=selected_model,
             contents=prompt_text
         )
-
-        if response and hasattr(response, "text") and response.text:
-            intent = response.text.strip().upper()
-            
-            # Strict filtering to ensure only expected keywords are returned
-            if "ASSESSMENT" in intent:
-                return "ASSESSMENT"
+        if response and response.text:
+            cleaned = response.text.strip().upper()
+            if "CBT" in cleaned:
+                return "CBT_REFRAME"
+            elif "ASSESSMENT" in cleaned or "MEMORY" in cleaned:
+                return "ASSESSMENT_MEMORY"
+            elif "INSIGHT" in cleaned:
+                return "INSIGHT"
             else:
                 return "THERAPY"
-                
     except Exception as e:
-        print(f"Orchestrator Error: {e}")
-        # Defaulting to THERAPY ensures a conversational fallback rather than a rigid quiz
+        logger.warning("Orchestrator classification error: %s. Defaulting to THERAPY", e)
         return "THERAPY"
 
-# Example Tests:
-# print(route_user_intent("Start a new stress test")) -> Returns ASSESSMENT
-# print(route_user_intent("What was my last assessment score?")) -> Returns THERAPY
+    return "THERAPY"

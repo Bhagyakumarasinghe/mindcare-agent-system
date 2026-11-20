@@ -36,7 +36,11 @@ export const exportData = () => authClient.get('/user/export');
 export const logoutUser = () => authClient.post('/user/logout');
 
 // --- CONVERSATIONAL CHAT (GEMINI) ---
-export const getNextQuestion = (history = []) => authClient.post('/user/assessment/next-question', { history });
+export const getNextQuestion = (payload = {}, config = {}) => authClient.post(
+  '/user/assessment/next-question', 
+  typeof payload === 'object' && !Array.isArray(payload) ? payload : { history: payload },
+  { timeout: 16000, ...config }
+);
 export const sendChatMessage = (message, history = []) => authClient.post('/user/chat', { message, history });
 
 // --- ADAPTIVE ASSESSMENT & NLP EVALUATION ---
@@ -63,6 +67,7 @@ export const deleteAcademicSubject = (subjectId) => authClient.delete(`/api/acad
 
 // --- ACTIVITY & WELLNESS TELEMETRY ---
 export const logActivity = (data) => authClient.post('/api/analytics/activity-log', data);
+export const getDailyTip = (userId) => authClient.get('/user/daily-tip', { params: userId ? { user_id: userId } : {} });
 
 // --- ACADEMIC AGENT SERVICES & CBT REFRAMING ---
 export const decomposeAcademicTask = (userId, subjectId, assignmentText) =>

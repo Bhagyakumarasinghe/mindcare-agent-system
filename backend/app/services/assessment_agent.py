@@ -10,7 +10,7 @@ load_dotenv()
 # Client configuration with Gemini API
 client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY"),
-    http_options={'api_version': 'v1beta'}
+    http_options={'api_version': 'v1beta', 'timeout': 30000}
 )
 
 def get_next_question(user_id, user_history):

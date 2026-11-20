@@ -96,7 +96,7 @@ Return strictly valid JSON with this exact schema:
         if gemini_api_key:
             client = genai.Client(
                 api_key=gemini_api_key,
-                http_options={"api_version": "v1beta"}
+                http_options={"api_version": "v1beta", "timeout": 30000}
             )
             response = client.models.generate_content(
                 model="gemini-flash-lite-latest",

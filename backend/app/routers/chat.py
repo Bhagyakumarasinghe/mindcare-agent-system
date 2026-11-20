@@ -83,12 +83,19 @@ async def chat_interaction_endpoint(
 
     # 2. Standard Supportive CBT Chat Flow
     try:
-        reply = get_therapy_response(user_id, user_message)
+        therapy_result = get_therapy_response(user_id, user_message, history=data.history or [])
+        reply_val = therapy_result.get("reply") if isinstance(therapy_result, dict) else str(therapy_result)
         return {
             "status": "success",
             "crisis_triggered": False,
-            "intent": "THERAPY",
-            "reply": reply
+            "intent": therapy_result.get("intent", "THERAPY") if isinstance(therapy_result, dict) else "THERAPY",
+            "agent_used": therapy_result.get("agent_used", "Profiling & Therapy Agent") if isinstance(therapy_result, dict) else "Profiling & Therapy Agent",
+            "suggested_tool": therapy_result.get("suggested_tool") if isinstance(therapy_result, dict) else None,
+            "mood": therapy_result.get("mood", "Neutral") if isinstance(therapy_result, dict) else "Neutral",
+            "thought_identification": therapy_result.get("thought_identification") if isinstance(therapy_result, dict) else None,
+            "reality_check": therapy_result.get("reality_check") if isinstance(therapy_result, dict) else None,
+            "cognitive_reframe": therapy_result.get("cognitive_reframe") if isinstance(therapy_result, dict) else None,
+            "reply": reply_val
         }
     except Exception as e:
         logger.error("AI Chat communication error: %s", e)
@@ -96,5 +103,11 @@ async def chat_interaction_endpoint(
             "status": "success",
             "crisis_triggered": False,
             "intent": "THERAPY",
+            "agent_used": "Profiling & Therapy Agent",
+            "suggested_tool": None,
+            "mood": "Neutral",
+            "thought_identification": None,
+            "reality_check": None,
+            "cognitive_reframe": None,
             "reply": "I am here with you. Please share what is weighing on your mind."
         }

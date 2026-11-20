@@ -17,6 +17,7 @@ async def register(user: UserCreate):
     hashed = hash_password(user.password)
     user_dict = user.dict()
     user_dict["password"] = hashed
+    user_dict["full_name"] = user.name
     result = await db.users.insert_one(user_dict)
 
     otp = generate_otp()
@@ -42,7 +43,17 @@ async def login(user: UserLogin):
         raise HTTPException(status_code=400, detail="Invalid credentials")
 
     token = create_access_token({"user_id": str(db_user["_id"])})
-    return {"access_token": token, "token_type": "bearer"}
+    full_name = db_user.get("full_name") or db_user.get("name") or "User"
+    return {
+        "access_token": token, 
+        "token_type": "bearer",
+        "user": {
+            "id": str(db_user["_id"]),
+            "name": full_name,
+            "full_name": full_name,
+            "email": db_user.get("email", "")
+        }
+    }
 
 @router.post("/send-otp")
 async def send_otp(payload: dict = Body(...)):

@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 from google import genai
 from dotenv import load_dotenv
 
-from app.db.neo4j import get_neo4j_session
+from app.db.neo4j import get_neo4j_session, save_chat_to_graph
+from app.services.profiling_agent import get_student_profile_summary
+from app.utils.encryption import encrypt_data
+from app.services.therapy_agent import infer_suggested_tool
 
 load_dotenv()
 
@@ -18,7 +21,7 @@ router = APIRouter(prefix="/api/agent", tags=["Academic Agent Services"])
 # Gemini Client Initialization
 try:
     gemini_api_key = os.getenv("GEMINI_API_KEY")
-    client = genai.Client(api_key=gemini_api_key) if gemini_api_key else None
+    client = genai.Client(api_key=gemini_api_key, http_options={'timeout': 30000}) if gemini_api_key else None
 except Exception as init_err:
     logger.warning("Failed to initialize genai Client: %s", init_err)
     client = None
@@ -47,7 +50,7 @@ def call_gemini_with_fallback(prompt: str, target_model: Optional[str] = None) -
         gemini_key = os.getenv("GEMINI_API_KEY")
         if gemini_key:
             try:
-                client = genai.Client(api_key=gemini_key)
+                client = genai.Client(api_key=gemini_key, http_options={'timeout': 30000})
             except Exception as e:
                 logger.debug("Client re-init failed: %s", e)
 
@@ -365,15 +368,27 @@ def cbt_reframing_chat(payload: CBTChatRequest):
         logger.warning("Crisis check error in cbt_chat: %s", crisis_err)
 
     target_topic = (payload.context_chip or payload.message).strip()
+    clean_user_id = str(payload.user_id or "demo_user").strip()
+
+    # Retrieve Longitudinal Context from Profiling Agent
+    student_context = get_student_profile_summary(clean_user_id)
 
     cbt_prompt = f"""
-    You are a Clinical CBT Specialist for university students.
+    You are a Clinical CBT Specialist for university students in Sri Lanka.
+    Active Specialized Agent: CBT Clinical Agent
     The student selected or expressed the topic: '{target_topic}'.
+
+    --- STUDENT LONGITUDINAL PROFILE (From Neo4j) ---
+    {student_context}
+
+    --- STUDENT'S INPUT ---
+    "{user_message}"
     
     Generate a distinct, clinically precise CBT reframe specifically tailored to '{target_topic}'.
     - If Exam Anxiety: target anticipatory failure and test distress.
     - If Deadline Pressure: target urgency panic, cognitive chunking, and time scarcity.
     - If Self-Doubt: target imposter syndrome and capability verification.
+    - If Sleep & Burnout: target restorative cognitive boundary setting and nervous system reset.
 
     Return strictly a JSON object:
     {{
@@ -408,8 +423,20 @@ def cbt_reframing_chat(payload: CBTChatRequest):
         f"1. Thought Identification: {thought_id}\n2. Reality Check: {reality_check}\n3. Cognitive Reframe: {cognitive_reframe}"
     )
 
+    suggested_tool = infer_suggested_tool(f"{target_topic} {user_message} {thought_id}")
+
+    # Encrypt and persist interaction to Neo4j
+    try:
+        encrypted_user = encrypt_data(user_message)
+        encrypted_reply = encrypt_data(reply)
+        save_chat_to_graph(clean_user_id, encrypted_user, encrypted_reply, "CBT_REFRAME", "Reflective")
+    except Exception as db_e:
+        logger.warning("Failed to save CBT interaction to Neo4j: %s", db_e)
+
     return {
         "status": "success",
+        "agent_used": "CBT Clinical Agent",
+        "suggested_tool": suggested_tool,
         "thought_identification": thought_id,
         "reality_check": reality_check,
         "cognitive_reframe": cognitive_reframe,

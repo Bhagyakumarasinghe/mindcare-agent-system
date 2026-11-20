@@ -10,7 +10,8 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
-  RefreshControl
+  RefreshControl,
+  StatusBar
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
@@ -55,7 +56,7 @@ const JournalScreen = ({ navigation }) => {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Load User Identity and Dynamic Journal Timeline
+  // Load User Identity and Dynamic Journal Timeline (Merging API + Local Chat Cache)
   const loadUserAndHistory = useCallback(async () => {
     let targetUser = activeUserId;
     try {
@@ -70,12 +71,54 @@ const JournalScreen = ({ navigation }) => {
 
     try {
       setLoadingHistory(true);
-      const res = await getJournalHistory(targetUser, 30);
-      if (res?.data?.status === 'success' && Array.isArray(res.data.entries)) {
-        setHistoryEntries(res.data.entries);
+      const [historyRes, localRaw] = await Promise.all([
+        getJournalHistory(targetUser, 30).catch((err) => {
+          console.log('Error loading decrypted journal history from API:', err?.message || err);
+          return null;
+        }),
+        AsyncStorage.getItem(`@mindcare_journal_entries_${targetUser}`).catch(() => null),
+      ]);
+
+      const backendEntries = (historyRes?.data?.status === 'success' && Array.isArray(historyRes.data.entries))
+        ? historyRes.data.entries
+        : [];
+
+      let localEntries = [];
+      if (localRaw) {
+        try {
+          const parsed = JSON.parse(localRaw);
+          if (Array.isArray(parsed)) localEntries = parsed;
+        } catch (parseErr) {
+          console.log('Error parsing local journal entries:', parseErr);
+        }
       }
+
+      // Deduplicate by ID and content, preserving richest decrypted data
+      const seenIds = new Set();
+      const seenContents = new Set();
+      const merged = [];
+
+      for (const item of [...backendEntries, ...localEntries]) {
+        const idKey = item.id ? String(item.id).trim() : null;
+        const contentKey = (item.content || '').trim().toLowerCase();
+        if (idKey && seenIds.has(idKey)) continue;
+        if (contentKey && seenContents.has(contentKey)) continue;
+
+        if (idKey) seenIds.add(idKey);
+        if (contentKey) seenContents.add(contentKey);
+        merged.push(item);
+      }
+
+      // Sort newest-first by timestamp
+      merged.sort((a, b) => {
+        const timeA = new Date(a.timestamp || 0).getTime();
+        const timeB = new Date(b.timestamp || 0).getTime();
+        return timeB - timeA;
+      });
+
+      setHistoryEntries(merged);
     } catch (err) {
-      console.log('Error loading decrypted journal history:', err.message || err);
+      console.log('Error syncing journal history:', err.message || err);
     } finally {
       setLoadingHistory(false);
       setRefreshing(false);
@@ -132,6 +175,17 @@ const JournalScreen = ({ navigation }) => {
         };
 
         setHistoryEntries(prev => [newEntry, ...prev]);
+
+        // Also cache locally for immediate offline & multi-session access
+        try {
+          const storageKey = `@mindcare_journal_entries_${activeUserId}`;
+          const existingRaw = await AsyncStorage.getItem(storageKey);
+          const existingList = existingRaw ? JSON.parse(existingRaw) : [];
+          await AsyncStorage.setItem(storageKey, JSON.stringify([newEntry, ...existingList]));
+        } catch (e) {
+          console.log('Error caching journal entry locally:', e?.message || e);
+        }
+
         Alert.alert('Reflection Recorded', 'Your encrypted reflection has been saved to your timeline.');
       } else {
         throw new Error('Analysis incomplete');
@@ -162,6 +216,16 @@ const JournalScreen = ({ navigation }) => {
         timestamp: new Date().toISOString()
       };
       setHistoryEntries(prev => [localEntry, ...prev]);
+
+      try {
+        const storageKey = `@mindcare_journal_entries_${activeUserId}`;
+        const existingRaw = await AsyncStorage.getItem(storageKey);
+        const existingList = existingRaw ? JSON.parse(existingRaw) : [];
+        await AsyncStorage.setItem(storageKey, JSON.stringify([localEntry, ...existingList]));
+      } catch (e) {
+        console.log('Error caching local fallback entry:', e?.message || e);
+      }
+
       setJournalInput('');
       Alert.alert('Reflection Recorded', 'Your reflection has been recorded to your clinical journal.');
     } finally {
@@ -190,40 +254,35 @@ const JournalScreen = ({ navigation }) => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Top Clinical Header Bar with Standardized Nested Settings Icon */}
-      <View style={styles.header}>
-        <TouchableOpacity 
-          onPress={() => navigation.goBack()} 
-          style={styles.backBtn}
-          activeOpacity={0.8}
-          accessibilityLabel="Go back"
-        >
-          <ArrowLeft color="#0D9488" size={20} />
-        </TouchableOpacity>
+    <View style={styles.container}>
+      {/* Ambient Translucent Mint-Teal & Soft Sky-Blue Circles */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
 
-        <View style={styles.headerTitleBox}>
-          <Text style={styles.headerTitle}>Reflective Journal</Text>
-          <View style={styles.decompressionBadge}>
-            <Text style={styles.decompressionBadgeText}>Cognitive Decompression</Text>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" backgroundColor="#F0F7F6" />
+
+        {/* Top Clinical Header Bar with Clean Symmetrical Layout */}
+        <View style={styles.header}>
+          <TouchableOpacity 
+            onPress={() => navigation.goBack()} 
+            style={styles.backBtn}
+            activeOpacity={0.8}
+            accessibilityLabel="Go back"
+          >
+            <ArrowLeft color="#0D9488" size={20} />
+          </TouchableOpacity>
+
+          <View style={styles.headerTitleBox}>
+            <Text style={styles.headerTitle}>Reflective Journal</Text>
           </View>
-        </View>
 
-        <View style={styles.headerRightGroup}>
           <View style={styles.encryptedPill}>
             <ShieldCheck size={12} color="#0F766E" />
             <Text style={styles.encryptedPillText}>Encrypted</Text>
           </View>
-          <TouchableOpacity 
-            style={styles.headerGearBtn}
-            onPress={() => navigation.navigate('Main', { screen: 'Profile' })}
-            activeOpacity={0.7}
-            accessibilityLabel="Settings"
-          >
-            <Settings size={17} color="#0D9488" />
-          </TouchableOpacity>
         </View>
-      </View>
 
       <KeyboardAvoidingView 
         style={{ flex: 1 }} 
@@ -236,22 +295,9 @@ const JournalScreen = ({ navigation }) => {
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#0D9488" />
           }
         >
-          {/* Prominent Reflection Input Card at Top */}
+          {/* Minimal Distraction-Free Reflection Input Card at Top */}
           <View style={styles.inputCard}>
-            <View style={styles.cardHeaderRow}>
-              <View style={styles.cardIconBadge}>
-                <BookOpen size={16} color="#0D9488" />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.cardHeaderTitle}>Self-Reflection Log</Text>
-                <Text style={styles.cardHeaderSubtitle}>
-                  Externalize thoughts, academic tension, or personal wins
-                </Text>
-              </View>
-            </View>
-
             {/* Emotion Selector Chips */}
-            <Text style={styles.fieldLabel}>Emotional Tone:</Text>
             <View style={styles.emotionsRow}>
               {EMOTIONS.map((tag) => {
                 const isSelected = selectedEmotion === tag;
@@ -280,10 +326,6 @@ const JournalScreen = ({ navigation }) => {
               onChangeText={setJournalInput}
               maxLength={1500}
             />
-
-            <View style={styles.charCountRow}>
-              <Text style={styles.charCountText}>{journalInput.length} / 1500 characters</Text>
-            </View>
 
             {/* "Save Reflection" Button in MindCare Teal (#0D9488) */}
             <TouchableOpacity
@@ -344,12 +386,12 @@ const JournalScreen = ({ navigation }) => {
             </View>
           )}
 
-          {/* Previous Journal Logs in a Clean Vertical Timeline */}
+          {/* Past Entries in a Clean Vertical Timeline */}
           <View style={styles.timelineSection}>
             <View style={styles.timelineHeaderRow}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Clock size={18} color="#0F766E" />
-                <Text style={styles.timelineSectionTitle}>Reflective Timeline History</Text>
+                <Text style={styles.timelineSectionTitle}>Past Entries</Text>
               </View>
               <View style={styles.countBadge}>
                 <Text style={styles.countBadgeText}>{historyEntries.length} {historyEntries.length === 1 ? 'log' : 'logs'}</Text>
@@ -386,19 +428,19 @@ const JournalScreen = ({ navigation }) => {
                           </View>
                           <View style={styles.entryEmotionPill}>
                             <Tag size={11} color="#0D9488" />
-                            <Text style={styles.entryEmotionPillText}>[{displayEmotion}]</Text>
+                            <Text style={styles.entryEmotionPillText}>{displayEmotion}</Text>
                           </View>
                         </View>
 
                         {/* Decrypted Entry Plain Text Content */}
                         <Text style={styles.entryContentText}>{entry.content}</Text>
 
-                        {/* NLU Coping Summary in Teal Border Box Below */}
+                        {/* AI Reflection in Teal Border Box Below */}
                         {Boolean(entry.reflection) && (
                           <View style={styles.entryReflectionBox}>
                             <View style={styles.reflectionHeader}>
                               <CheckCircle2 size={13} color="#0D9488" />
-                              <Text style={styles.reflectionTitle}>NLU Coping Summary</Text>
+                              <Text style={styles.reflectionTitle}>AI Reflection</Text>
                             </View>
                             <Text style={styles.entryReflectionText}>
                               "{entry.reflection}"
@@ -430,14 +472,47 @@ const JournalScreen = ({ navigation }) => {
         crisisData={crisisData}
         source="Reflective Journal"
       />
-    </SafeAreaView>
+      </SafeAreaView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F0F7F6',
+    position: 'relative',
+  },
+  safeArea: {
+    flex: 1,
+  },
+  // Ambient Translucent Mint-Teal & Soft Sky-Blue Circles
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(45, 212, 191, 0.22)',
+  },
+  ambientOrbMiddle: {
+    position: 'absolute',
+    top: 360,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.18)',
+  },
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: 80,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
   },
   header: {
     flexDirection: 'row',
@@ -446,18 +521,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#E2E8F0',
-    backgroundColor: '#FFFFFF',
+    borderBottomColor: 'rgba(226, 232, 240, 0.7)',
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
   },
   backBtn: {
     width: 36,
     height: 36,
     borderRadius: 10,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
   },
   headerTitleBox: {
     alignItems: 'center',
@@ -470,49 +550,33 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0F172A',
   },
-  decompressionBadge: {
-    backgroundColor: '#E6F4F1',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
-    marginTop: 3,
-  },
-  decompressionBadgeText: {
-    fontSize: 10,
+  headerSubtitle: {
+    fontSize: 11,
     color: '#0F766E',
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  headerRightGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
+    fontWeight: '600',
+    marginTop: 2,
+    letterSpacing: 0.2,
   },
   encryptedPill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#F0FDFA',
-    paddingHorizontal: 7,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    paddingHorizontal: 8,
     paddingVertical: 5,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 1,
   },
   encryptedPillText: {
     fontSize: 10,
     fontWeight: '700',
     color: '#0F766E',
-  },
-  headerGearBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   scrollContent: {
     paddingHorizontal: 16,
@@ -520,17 +584,17 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   inputCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 22,
     borderWidth: 1.5,
-    borderColor: '#E2E8F0',
+    borderColor: '#FFFFFF',
     padding: 16,
     marginBottom: 20,
-    elevation: 1,
+    elevation: 2,
     shadowColor: '#64748B',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
   },
   cardHeaderRow: {
     flexDirection: 'row',
@@ -604,6 +668,7 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     minHeight: 120,
     textAlignVertical: 'top',
+    marginBottom: 14,
   },
   charCountRow: {
     alignItems: 'flex-end',
@@ -636,12 +701,17 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   summaryCard: {
-    backgroundColor: '#F0FDFA',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
     borderWidth: 1.5,
-    borderColor: '#99F6E4',
-    borderRadius: 16,
+    borderColor: '#FFFFFF',
+    borderRadius: 22,
     padding: 16,
     marginBottom: 20,
+    elevation: 2,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
   },
   summaryHeader: {
     flexDirection: 'row',
@@ -795,16 +865,16 @@ const styles = StyleSheet.create({
   },
   entryCard: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    padding: 14,
-    elevation: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 16,
+    elevation: 2,
     shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 5,
   },
   entryHeaderRow: {
     flexDirection: 'row',
@@ -873,13 +943,18 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   emptyStateCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
     padding: 24,
     alignItems: 'center',
     justifyContent: 'center',
+    elevation: 2,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 5,
   },
   emptyStateTitle: {
     fontSize: 14,

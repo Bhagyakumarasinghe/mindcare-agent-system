@@ -42,18 +42,53 @@ async def get_journal_summary(
         with get_neo4j_session() as session:
             # 2. Execute dynamic Cypher query matching real user graph entries
             cypher = """
-            MATCH (u:User {id: $user_id})
+            MATCH (u:User)
+            WHERE u.id = $user_id OR u.user_id = $user_id
             OPTIONAL MATCH (u)-[:WROTE_JOURNAL]->(j:JournalEntry)
             OPTIONAL MATCH (j)-[:REFLECTS_EMOTION]->(e:Emotion)
             OPTIONAL MATCH (j)-[:HAS_TRIGGER]->(t:AcademicTrigger)
-            WITH count(DISTINCT j) AS totalJournals,
-                 collect(coalesce(e.type, j.emotion)) AS rawEmotions,
-                 collect(coalesce(t.category, j.trigger)) AS rawTriggers
-            RETURN totalJournals, rawEmotions, rawTriggers
+            OPTIONAL MATCH (u)-[:LOGGED_MOOD]->(m:MoodLog)
+            RETURN count(DISTINCT j) AS totalJournals,
+                   count(DISTINCT m) AS totalMoods,
+                   collect(coalesce(e.type, j.emotion)) AS rawEmotions,
+                   collect(coalesce(t.category, j.trigger)) AS rawTriggers,
+                   collect(m.emotion_tags) AS moodEmotionTags,
+                   collect(m.stress_factors) AS moodStressFactors,
+                   collect(m.stress_factor) AS moodSingleTriggers
             """
             result = session.run(cypher, user_id=resolved_user_id).single()
 
-            if not result or result.get("totalJournals", 0) == 0:
+            total_journals = int(result.get("totalJournals", 0)) if result else 0
+            total_moods = int(result.get("totalMoods", 0)) if result else 0
+            raw_emotions = list(result.get("rawEmotions") or []) if result else []
+            raw_triggers = list(result.get("rawTriggers") or []) if result else []
+            mood_emotion_tags = list(result.get("moodEmotionTags") or []) if result else []
+            mood_stress_factors = list(result.get("moodStressFactors") or []) if result else []
+            mood_single_triggers = list(result.get("moodSingleTriggers") or []) if result else []
+
+            # Flatten mood emotion tags
+            for tags in mood_emotion_tags:
+                if isinstance(tags, list):
+                    raw_emotions.extend(tags)
+                elif isinstance(tags, str) and tags.strip():
+                    raw_emotions.append(tags)
+
+            # Flatten mood stress factors
+            for sfs in mood_stress_factors:
+                if isinstance(sfs, list):
+                    raw_triggers.extend([sf for sf in sfs if str(sf).lower() != "none"])
+                elif isinstance(sfs, str) and sfs.strip() and sfs.lower() != "none":
+                    raw_triggers.append(sfs)
+            for sf in mood_single_triggers:
+                if sf and str(sf).strip() and str(sf).lower() != "none":
+                    raw_triggers.append(str(sf).strip())
+
+            # Filter valid, non-null, non-empty values
+            clean_emotions = [str(e).strip() for e in raw_emotions if e is not None and str(e).strip() != "" and str(e).lower() != "none"]
+            clean_triggers = [str(t).strip() for t in raw_triggers if t is not None and str(t).strip() != "" and str(t).lower() != "none"]
+            total_entries_count = max(total_journals + total_moods, len(clean_emotions), len(clean_triggers))
+
+            if total_entries_count == 0:
                 # 3. Clean Zero State: Return empty arrays with 0 entries, no mock data
                 return {
                     "status": "success",
@@ -66,14 +101,6 @@ async def get_journal_summary(
                     "avg_sentiment": 0.0
                 }
 
-            total_journals = int(result.get("totalJournals", 0))
-            raw_emotions = result.get("rawEmotions") or []
-            raw_triggers = result.get("rawTriggers") or []
-
-            # Filter valid, non-null, non-empty values
-            clean_emotions = [str(e).strip() for e in raw_emotions if e is not None and str(e).strip() != ""]
-            clean_triggers = [str(t).strip() for t in raw_triggers if t is not None and str(t).strip() != ""]
-
             # 4. Compute dynamic emotion distribution and percentages in Python
             emotion_counter = Counter(clean_emotions)
             emotions_list = [
@@ -81,9 +108,9 @@ async def get_journal_summary(
                     "name": emotion,
                     "emotion": emotion,
                     "count": count,
-                    "percentage": round((count / total_journals) * 100) if total_journals > 0 else 0
+                    "percentage": round((count / len(clean_emotions)) * 100) if clean_emotions else 0
                 }
-                for emotion, count in emotion_counter.most_common()
+                for emotion, count in emotion_counter.most_common(6)
             ]
 
             # 5. Compute dynamic stress factor frequencies in Python
@@ -94,18 +121,18 @@ async def get_journal_summary(
                     "trigger": trigger,
                     "count": count
                 }
-                for trigger, count in trigger_counter.most_common()
+                for trigger, count in trigger_counter.most_common(6)
             ]
 
             logger.info(
-                "Dynamically aggregated journal summary for %s: %d journals, %d emotions, %d triggers",
-                resolved_user_id, total_journals, len(emotions_list), len(stress_factors_list)
+                "Dynamically aggregated journal summary for %s: %d total entries, %d emotions, %d triggers",
+                resolved_user_id, total_entries_count, len(emotions_list), len(stress_factors_list)
             )
 
             return {
                 "status": "success",
                 "user_id": resolved_user_id,
-                "total_entries": total_journals,
+                "total_entries": total_entries_count,
                 "emotions": emotions_list,
                 "stress_factors": stress_factors_list,
                 # Backward-compatibility aliases
@@ -212,6 +239,7 @@ async def record_activity_log(
 
 
 @router.get("/api/reports/weekly")
+@router.get("/api/analytics")
 async def get_weekly_report(
     user_id: Optional[str] = Query(None, description="User ID for weekly clinical report"),
     authorization: Optional[str] = Header(None, description="Optional bearer token for authenticated user")
@@ -232,6 +260,8 @@ async def get_weekly_report(
             payload = decode_access_token(token)
             if payload and payload.get("user_id"):
                 resolved_user_id = str(payload.get("user_id"))
+            elif payload and payload.get("id"):
+                resolved_user_id = str(payload.get("id"))
         except Exception:
             pass
 
@@ -247,12 +277,13 @@ async def get_weekly_report(
 
     try:
         with get_neo4j_session() as session:
-            # 2. Activity Summary counts via exact Cypher
+            # 2. Activity Summary counts strictly scoped to user
             cypher_counts = """
-            MATCH (u:User {id: $user_id})
+            MATCH (u:User)
+            WHERE u.user_id = $user_id OR u.id = $user_id
             OPTIONAL MATCH (u)-[:LOGGED_MOOD]->(m:MoodLog)
             OPTIONAL MATCH (u)-[:ENGAGED_IN]->(c:ChatSession)
-            OPTIONAL MATCH (u)-[:COMPLETED_ASSESSMENT]->(a:Assessment)
+            OPTIONAL MATCH (u)-[:COMPLETED_ASSESSMENT|PERFORMED_CHECKUP]->(a:Assessment)
             OPTIONAL MATCH (u)-[:COMPLETED_ACTIVITY]->(act:ActivityLog)
             RETURN count(DISTINCT m) AS mood_count,
                    count(DISTINCT c) AS support_count,
@@ -265,34 +296,56 @@ async def get_weekly_report(
             assessment_count = int(counts_res.get("assessment_count", 0)) if counts_res else 0
             relaxation_count = int(counts_res.get("relaxation_count", 0)) if counts_res else 0
 
-            # 3. Fetch Recent Mood Logs
+            # 3. Fetch Recent Mood Logs strictly scoped to user
             cypher_moods = """
-            MATCH (u:User {id: $user_id})-[:LOGGED_MOOD]->(m:MoodLog)
+            MATCH (u:User)-[:LOGGED_MOOD]->(m:MoodLog)
+            WHERE u.user_id = $user_id OR u.id = $user_id
             RETURN coalesce(m.stress_level, m.stress_score) AS stress,
-                   m.sleep_hours AS sleep_hours,
+                   coalesce(m.sleep_hours, 7.0) AS sleep_hours,
+                   coalesce(m.sleep_hours, 7.0) AS sleep,
                    m.stress_factor AS stress_factor,
+                   coalesce(m.stress_factors, []) AS stress_factors,
                    m.mood AS mood,
+                   coalesce(m.emotion_tags, []) AS emotion_tags,
+                   coalesce(m.energy_level, 'Steady') AS energy_level,
                    m.note AS note,
-                   toString(m.timestamp) AS timestamp
-            ORDER BY m.timestamp DESC
-            LIMIT 10
+                   m.activities AS activities,
+                   toString(coalesce(m.timestamp, m.created_at, datetime())) AS timestamp,
+                   toString(coalesce(m.timestamp, m.created_at, datetime())) AS date
+            ORDER BY coalesce(m.timestamp, m.created_at) DESC, elementId(m) DESC
+            LIMIT 25
             """
             mood_records = session.run(cypher_moods, user_id=resolved_user_id).data()
 
-            # 4. Fetch Completed Assessments
+            # 4. Fetch Completed Assessments strictly scoped to user and ordered strictly by timestamp DESC
             cypher_assessments = """
-            MATCH (u:User {id: $user_id})-[:COMPLETED_ASSESSMENT]->(a:Assessment)
-            RETURN coalesce(a.score, CASE a.level WHEN 'High' THEN 8.0 WHEN 'Moderate' THEN 5.5 WHEN 'Low' THEN 2.5 ELSE 5.0 END) AS score,
-                   a.level AS level,
-                   toString(a.timestamp) AS timestamp
-            ORDER BY a.timestamp DESC
-            LIMIT 20
+            MATCH (u:User)-[:COMPLETED_ASSESSMENT|PERFORMED_CHECKUP]->(a:Assessment)
+            WHERE u.user_id = $user_id OR u.id = $user_id
+            RETURN coalesce(a.scaled_pss_score, a.pss_score, a.score, CASE coalesce(a.level, a.label) WHEN 'High' THEN 8.0 WHEN 'Moderate' THEN 5.5 WHEN 'Low' THEN 2.5 ELSE 5.0 END) AS score,
+                   coalesce(a.level, a.label, 'Moderate') AS level,
+                   coalesce(a.created_at, toString(a.timestamp), toString(datetime())) AS created_at,
+                   coalesce(toString(a.timestamp), a.created_at, toString(datetime())) AS timestamp
+            ORDER BY coalesce(a.timestamp, a.created_at) DESC, elementId(a) DESC
+            LIMIT 25
             """
             assessment_records = session.run(cypher_assessments, user_id=resolved_user_id).data()
 
-            # 5. Fetch Top Academic / Life Trigger
+            # 4b. Fetch Completed Relaxation / Activity sessions strictly scoped to user
+            cypher_activities = """
+            MATCH (u:User)-[:COMPLETED_ACTIVITY]->(act:ActivityLog)
+            WHERE u.user_id = $user_id OR u.id = $user_id
+            RETURN toString(coalesce(act.timestamp, act.created_at, datetime())) AS timestamp,
+                   coalesce(act.activity_type, 'Wellness') AS activity_type,
+                   coalesce(act.duration_minutes, 5) AS duration
+            ORDER BY coalesce(act.timestamp, act.created_at) DESC
+            LIMIT 25
+            """
+            activity_records = session.run(cypher_activities, user_id=resolved_user_id).data()
+
+            # 5. Fetch Top Academic / Life Trigger strictly scoped to user
             cypher_trigger = """
-            MATCH (u:User {id: $user_id})-[:WROTE_JOURNAL]->(j:JournalEntry)
+            MATCH (u:User)-[:WROTE_JOURNAL]->(j:JournalEntry)
+            WHERE u.user_id = $user_id OR u.id = $user_id
             OPTIONAL MATCH (j)-[:HAS_TRIGGER]->(t:AcademicTrigger)
             RETURN coalesce(t.category, j.trigger) AS trigger, count(*) AS count
             ORDER BY count DESC
@@ -301,7 +354,7 @@ async def get_weekly_report(
             trigger_res = session.run(cypher_trigger, user_id=resolved_user_id).single()
             top_trigger_from_journal = trigger_res.get("trigger") if trigger_res else None
 
-            # 6. Weekly Variance Calculation
+            # 6. Weekly Variance Calculation purely driven by Clinical Stress Assessments (:Assessment nodes)
             current_scores = []
             prev_scores = []
             all_entries = []
@@ -309,9 +362,7 @@ async def get_weekly_report(
             for a in assessment_records:
                 if a.get("score") is not None and a.get("timestamp"):
                     all_entries.append((str(a["timestamp"]), float(a["score"])))
-            for m in mood_records:
-                if m.get("stress") is not None and m.get("timestamp"):
-                    all_entries.append((str(m["timestamp"]), float(m["stress"])))
+            # Note: mood_records manual stress is NOT blended into clinical assessment stress analytics
 
             for ts_str, score in all_entries:
                 try:
@@ -327,16 +378,16 @@ async def get_weekly_report(
                     pass
 
             if prev_scores:
-                current_avg = sum(current_scores) / len(current_scores) if current_scores else (sum(s for _, s in all_entries) / len(all_entries) if all_entries else 5.0)
+                current_avg = sum(current_scores) / len(current_scores) if current_scores else (sum(s for _, s in all_entries) / len(all_entries) if all_entries else 0.0)
                 prev_avg = sum(prev_scores) / len(prev_scores)
                 variance = round(((current_avg - prev_avg) / prev_avg) * 100) if prev_avg > 0 else 0
                 is_baseline = False
             else:
-                current_avg = sum(current_scores) / len(current_scores) if current_scores else (sum(s for _, s in all_entries) / len(all_entries) if all_entries else 5.0)
+                current_avg = sum(current_scores) / len(current_scores) if current_scores else (sum(s for _, s in all_entries) / len(all_entries) if all_entries else 0.0)
                 variance = 0
                 is_baseline = True
 
-            evaluated_stress = round(float(current_avg), 1)
+            evaluated_stress = round(float(current_avg), 1) if all_entries else (round(float(assessment_records[0]["score"]), 1) if assessment_records and assessment_records[0].get("score") is not None else 0.0)
 
             # 7. Dynamic Personalized Recommendations Engine
             # A. Sleep Recommendation
@@ -404,12 +455,126 @@ async def get_weekly_report(
 
             recommendations = [sleep_rec, cognitive_rec, autonomic_rec]
 
+            latest_assessment = assessment_records[0] if assessment_records else None
+            latest_assessment_score = round(float(latest_assessment["score"]), 1) if latest_assessment and latest_assessment.get("score") is not None else None
+            latest_assessment_level = str(latest_assessment["level"]) if latest_assessment and latest_assessment.get("level") is not None else None
+            effective_assessment_count = max(len(assessment_records), assessment_count)
+
+            # 8. Compute Unified 7-Day Holistic Wellness Trend (Mon-Sun)
+            days_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            daily_wellness_buckets = {
+                d: {
+                    "assessments": [],
+                    "moods": [],
+                    "energies": [],
+                    "sleeps": [],
+                    "activities": 0
+                }
+                for d in days_order
+            }
+
+            def _parse_dt_safe(ts_val):
+                if not ts_val:
+                    return None
+                try:
+                    cleaned = str(ts_val).split(".")[0].replace("Z", "+00:00")
+                    if "+" not in cleaned and "-" not in cleaned[10:]:
+                        cleaned += "+00:00"
+                    return datetime.datetime.fromisoformat(cleaned)
+                except Exception:
+                    return None
+
+            # Incorporate assessments: stress 0-10 -> wellness 0-100 (inverting stress)
+            for a in assessment_records:
+                dt = _parse_dt_safe(a.get("timestamp") or a.get("created_at"))
+                if dt and dt >= seven_days_ago:
+                    day_key = days_order[dt.weekday()]
+                    try:
+                        sc = float(a["score"])
+                        w = max(0.0, min(100.0, (10.0 - sc) * 10.0))
+                        daily_wellness_buckets[day_key]["assessments"].append(w)
+                    except Exception:
+                        pass
+
+            # Incorporate mood check-ins (affect, energy, sleep)
+            mood_map = {"great": 95.0, "good": 80.0, "okay": 65.0, "bad": 40.0, "terrible": 25.0}
+            energy_map = {"energized": 90.0, "steady": 75.0, "drained": 40.0}
+
+            for m in mood_records:
+                dt = _parse_dt_safe(m.get("timestamp") or m.get("date"))
+                if dt and dt >= seven_days_ago:
+                    day_key = days_order[dt.weekday()]
+                    m_str = str(m.get("mood") or "").strip().lower()
+                    if m_str in mood_map:
+                        daily_wellness_buckets[day_key]["moods"].append(mood_map[m_str])
+                    e_str = str(m.get("energy_level") or "").strip().lower()
+                    if e_str in energy_map:
+                        daily_wellness_buckets[day_key]["energies"].append(energy_map[e_str])
+                    try:
+                        s_val = float(m.get("sleep_hours") if m.get("sleep_hours") is not None else 7.0)
+                        s_score = max(20.0, min(100.0, 100.0 - abs(s_val - 8.0) * 15.0))
+                        daily_wellness_buckets[day_key]["sleeps"].append(s_score)
+                    except Exception:
+                        pass
+
+            # Incorporate wellness / relaxation sessions
+            for act in activity_records:
+                dt = _parse_dt_safe(act.get("timestamp"))
+                if dt and dt >= seven_days_ago:
+                    day_key = days_order[dt.weekday()]
+                    daily_wellness_buckets[day_key]["activities"] += 1
+
+            holistic_wellness_trend = []
+            for d in days_order:
+                b = daily_wellness_buckets[d]
+                parts = []
+                weights = []
+
+                if b["assessments"]:
+                    parts.append(sum(b["assessments"]) / len(b["assessments"]))
+                    weights.append(0.35)
+                if b["moods"]:
+                    parts.append(sum(b["moods"]) / len(b["moods"]))
+                    weights.append(0.30)
+                if b["energies"]:
+                    parts.append(sum(b["energies"]) / len(b["energies"]))
+                    weights.append(0.15)
+                if b["sleeps"]:
+                    parts.append(sum(b["sleeps"]) / len(b["sleeps"]))
+                    weights.append(0.20)
+
+                has_day_data = len(parts) > 0 or b["activities"] > 0
+                if has_day_data:
+                    base_val = sum(p * w for p, w in zip(parts, weights)) / sum(weights) if weights else 70.0
+                    activity_boost = min(10.0, b["activities"] * 5.0)
+                    computed_score = round(max(20.0, min(100.0, base_val + activity_boost)))
+                    holistic_wellness_trend.append({
+                        "day": d,
+                        "val": computed_score,
+                        "score": computed_score,
+                        "has_data": True
+                    })
+                else:
+                    holistic_wellness_trend.append({
+                        "day": d,
+                        "val": 14,
+                        "score": 0,
+                        "has_data": False
+                    })
+
+            valid_scores = [item["score"] for item in holistic_wellness_trend if item["has_data"]]
+            avg_wellness_index = round(sum(valid_scores) / len(valid_scores), 1) if valid_scores else 72.0
+
             return {
                 "status": "success",
                 "user_id": resolved_user_id,
                 "start_date": start_date_str,
                 "end_date": end_date_str,
                 "avg_stress": evaluated_stress,
+                "latest_assessment_score": latest_assessment_score,
+                "latest_assessment_level": latest_assessment_level,
+                "total_assessments": effective_assessment_count,
+                "history": assessment_records,
                 "avg_sleep": round(latest_sleep, 1),
                 "common_trigger": workload_factor,
                 "primary_stress_vector": workload_factor,
@@ -419,11 +584,13 @@ async def get_weekly_report(
                 "activity_summary": {
                     "mood_count": mood_count,
                     "support_count": support_count,
-                    "assessment_count": assessment_count,
+                    "assessment_count": effective_assessment_count,
                     "relaxation_count": relaxation_count
                 },
                 "recommendations": recommendations,
-                "recent_mood_logs": mood_records[:7]
+                "recent_mood_logs": mood_records[:7],
+                "holistic_wellness_trend": holistic_wellness_trend,
+                "avg_wellness_index": avg_wellness_index
             }
 
     except Exception as err:
@@ -434,6 +601,10 @@ async def get_weekly_report(
             "start_date": start_date_str,
             "end_date": end_date_str,
             "avg_stress": 5.0,
+            "latest_assessment_score": None,
+            "latest_assessment_level": None,
+            "total_assessments": 0,
+            "history": [],
             "avg_sleep": 7.0,
             "common_trigger": "General Academic Studies",
             "primary_stress_vector": "General Academic Studies",
@@ -463,6 +634,16 @@ async def get_weekly_report(
                     "icon": "Activity"
                 }
             ],
-            "recent_mood_logs": []
+            "recent_mood_logs": [],
+            "holistic_wellness_trend": [
+                {"day": "Mon", "val": 14, "score": 0, "has_data": False},
+                {"day": "Tue", "val": 14, "score": 0, "has_data": False},
+                {"day": "Wed", "val": 14, "score": 0, "has_data": False},
+                {"day": "Thu", "val": 14, "score": 0, "has_data": False},
+                {"day": "Fri", "val": 14, "score": 0, "has_data": False},
+                {"day": "Sat", "val": 14, "score": 0, "has_data": False},
+                {"day": "Sun", "val": 14, "score": 0, "has_data": False},
+            ],
+            "avg_wellness_index": 70.0
         }
 

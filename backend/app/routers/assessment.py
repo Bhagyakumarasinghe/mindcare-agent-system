@@ -7,7 +7,9 @@ from app.routers.protected_routes import get_current_user
 from app.routers.user_routes import (
     EvaluateResponseRequest,
     evaluate_assessment_response,
-    estimate_likert_from_text
+    estimate_likert_from_text,
+    NextQuestionRequest,
+    assessment_handler
 )
 
 router = APIRouter(prefix="/assessment", tags=["Assessment Evaluator"])
@@ -15,3 +17,7 @@ router = APIRouter(prefix="/assessment", tags=["Assessment Evaluator"])
 @router.post("/evaluate-response")
 async def evaluate_response(data: EvaluateResponseRequest, current_user: dict = Depends(get_current_user)):
     return await evaluate_assessment_response(data, current_user)
+
+@router.post("/next-question")
+async def next_question_proxy(data: NextQuestionRequest, current_user: dict = Depends(get_current_user)):
+    return await assessment_handler(data, current_user)

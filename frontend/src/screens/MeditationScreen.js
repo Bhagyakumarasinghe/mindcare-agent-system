@@ -5,11 +5,8 @@ import {
   StyleSheet, 
   TouchableOpacity, 
   ScrollView, 
-  Animated, 
-  Easing, 
   Alert,
   Dimensions,
-  Platform
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
@@ -21,58 +18,79 @@ import {
   SkipForward, 
   Volume2, 
   VolumeX, 
-  Headphones, 
   CloudRain, 
   Wind, 
   Bell, 
-  CheckCircle2,
-  Clock,
-  Waves,
-  Flame,
+  Waves, 
   Music,
-  Moon
 } from 'lucide-react-native';
-import Svg, { Circle } from 'react-native-svg';
+import { useAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createSafeAudioPlayer } from '../utils/safeAudio';
 import { logActivity } from '../api/authService';
 
 const { width } = Dimensions.get('window');
-const TOTAL_DURATION = 5 * 60; // 5 Minutes (300 Seconds)
 
-// 10 Distinct Ambient & Clinical Soundscapes
+// 3 Curated Immersive Visual Sanctuary Video Scenes
+const VISUAL_SCENES = [
+  {
+    id: 'sanctuary',
+    label: 'Dreamy Sanctuary',
+    source: require('../../assets/videos/calm-sanctuary.mp4'),
+  },
+  {
+    id: 'horizon',
+    label: 'Serene Horizon',
+    source: require('../../assets/videos/background-video-1.mp4'),
+  },
+  {
+    id: 'flow',
+    label: 'Mindful Flow',
+    source: require('../../assets/videos/mood-banner-video.mp4'),
+  },
+];
+
+// 4 Interactive Session Duration Presets
+const DURATION_PRESETS = [
+  { label: '3m', seconds: 3 * 60 },
+  { label: '5m', seconds: 5 * 60 },
+  { label: '10m', seconds: 10 * 60 },
+  { label: '15m', seconds: 15 * 60 },
+];
+
+// 7 Bundled Local Audio Soundscapes with High-Fidelity Audio Loops
 const SOUNDSCAPES = [
   {
     id: 'rain_waves',
     title: 'Calming Ambient Rain & Waves',
     subtitle: 'Gentle precipitation & soft shorelines',
     category: 'Decompression',
-    icon: 'Rain',
-    source: require('../../assets/calm_ambient.mp3'),
+    icon: 'CloudRain',
+    source: require('../../assets/audio/mixkit-light-rain-loop-2393.wav'),
   },
   {
     id: 'forest_stream',
     title: 'Forest Birds & Stream',
     subtitle: 'Woodland canopy & flowing stream',
     category: 'Restoration',
-    icon: 'Forest',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2022/05/16/audio_db6591201e.mp3' },
+    icon: 'Wind',
+    source: require('../../assets/audio/baranova_n-water-stream-636804.mp3'),
   },
   {
     id: 'zen_bowls',
     title: 'Deep Zen Tibetan Bowls',
     subtitle: 'Harmonic Tibetan resonant tones',
     category: 'Alpha Waves',
-    icon: 'Bowls',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2022/10/14/audio_9939f795cb.mp3' },
+    icon: 'Bell',
+    source: require('../../assets/audio/freesound_community-singing-bell-hit-1-105400.mp3'),
   },
   {
     id: 'binaural_alpha',
     title: 'Binaural Alpha Waves (Focus 10Hz)',
-    subtitle: '10Hz alpha frequency for cognitive flow',
-    category: 'Focus',
+    subtitle: 'Dreamy ambient pads for cognitive flow',
+    category: 'Focus Flow',
     icon: 'Waves',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3' },
+    source: require('../../assets/audio/alpha-samples-bandcamp-alpha-samples-200-dreamy-pads-sample-pack-246890.mp3'),
   },
   {
     id: 'white_noise',
@@ -80,15 +98,15 @@ const SOUNDSCAPES = [
     subtitle: 'Consistent acoustic masking for calm',
     category: 'Clarity',
     icon: 'Wind',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2021/08/09/audio_88447e769f.mp3' },
+    source: require('../../assets/audio/extrasounds-white-noise-358382.mp3'),
   },
   {
-    id: 'midnight_campfire',
-    title: 'Midnight Campfire',
-    subtitle: 'Gentle crackle & soothing warmth',
+    id: 'thunder_rain',
+    title: 'Thunder & Light Rain',
+    subtitle: 'Distant thunder rumble & soothing rain',
     category: 'Grounding',
-    icon: 'Flame',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2022/03/09/audio_c8c8a73467.mp3' },
+    icon: 'CloudRain',
+    source: require('../../assets/audio/mixkit-thunder-rumble-and-light-rain-2401.wav'),
   },
   {
     id: 'ocean_surf',
@@ -96,187 +114,148 @@ const SOUNDSCAPES = [
     subtitle: 'Rhythmic tides & maritime tranquility',
     category: 'Relaxation',
     icon: 'Waves',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2021/09/06/audio_3457a8236c.mp3' },
-  },
-  {
-    id: 'piano_sanctuary',
-    title: 'Soft Piano Sanctuary',
-    subtitle: 'Minimalist restorative acoustic melodies',
-    category: 'Serenity',
-    icon: 'Music',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3' },
-  },
-  {
-    id: 'delta_waves',
-    title: 'Delta Waves Deep Reset',
-    subtitle: 'Low-frequency somatic sleep & restoration',
-    category: 'Deep Sleep',
-    icon: 'Moon',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2022/11/06/audio_c3c3a9f0e8.mp3' },
-  },
-  {
-    id: 'autumn_wind',
-    title: 'Autumn Wind & Leaves',
-    subtitle: 'Gentle breeze whispering through foliage',
-    category: 'Presence',
-    icon: 'Wind',
-    source: { uri: 'https://cdn.pixabay.com/download/audio/2021/09/06/audio_7314d68233.mp3' },
+    source: require('../../assets/audio/dragon-studio-ocean-waves-376898.mp3'),
   },
 ];
 
 const MeditationScreen = ({ navigation }) => {
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [sessionDuration, setSessionDuration] = useState(5 * 60); // Default 5 min
   const [secondsSpent, setSecondsSpent] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [selectedTrackIndex, setSelectedTrackIndex] = useState(0);
+  const [activeSceneIndex, setActiveSceneIndex] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [breathingPhase, setBreathingPhase] = useState('Inhale');
 
   const timeSpentRef = useRef(0);
   timeSpentRef.current = secondsSpent;
-  const soundRef = useRef(null);
 
-  // Soothing breathing pulse animation
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const pulseOpacity = useRef(new Animated.Value(0.4)).current;
+  const activeTrack = SOUNDSCAPES[selectedTrackIndex];
+  const activeScene = VISUAL_SCENES[activeSceneIndex];
 
-  // Pulse animation loop
+  // 1. expo-video Player for Visual Sanctuary
+  const videoPlayer = useVideoPlayer(activeScene.source, (player) => {
+    player.loop = true;
+    player.muted = true;
+  });
+
+  // 2. expo-audio Player for Curated Soundscapes
+  const audioPlayer = useAudioPlayer(activeTrack.source);
+
+  // Configure Audio Mode once on mount (expo-audio)
   useEffect(() => {
-    let animLoop = null;
-    if (isPlaying) {
-      animLoop = Animated.loop(
-        Animated.sequence([
-          Animated.parallel([
-            Animated.timing(pulseAnim, {
-              toValue: 1.15,
-              duration: 4000,
-              easing: Easing.inOut(Easing.ease),
-              useNativeDriver: true,
-            }),
-            Animated.timing(pulseOpacity, {
-              toValue: 0.85,
-              duration: 4000,
-              easing: Easing.inOut(Easing.ease),
-              useNativeDriver: true,
-            }),
-          ]),
-          Animated.parallel([
-            Animated.timing(pulseAnim, {
-              toValue: 1.0,
-              duration: 4000,
-              easing: Easing.inOut(Easing.ease),
-              useNativeDriver: true,
-            }),
-            Animated.timing(pulseOpacity, {
-              toValue: 0.4,
-              duration: 4000,
-              easing: Easing.inOut(Easing.ease),
-              useNativeDriver: true,
-            }),
-          ]),
-        ])
-      );
-      animLoop.start();
-    } else {
-      pulseAnim.setValue(1);
-      pulseOpacity.setValue(0.4);
-    }
-
-    return () => {
-      if (animLoop) animLoop.stop();
+    const initAudioMode = async () => {
+      try {
+        if (typeof setAudioModeAsync === 'function') {
+          await setAudioModeAsync({
+            playsInSilentMode: true,
+            shouldDuckAndroid: true,
+          });
+        }
+      } catch (err) {
+        console.warn('expo-audio setAudioModeAsync notice:', err?.message || err);
+      }
     };
-  }, [isPlaying]);
+    initAudioMode();
+  }, []);
 
-  // Derive breathing cycle guidance (8s full cycle: 4s Inhale, 4s Exhale)
+  // Sync Audio Player settings (loop, mute, volume)
   useEffect(() => {
-    if (!isPlaying) {
-      setBreathingPhase('Mindful Rest');
-      return;
+    if (audioPlayer) {
+      try {
+        audioPlayer.loop = true;
+        audioPlayer.volume = isMuted ? 0 : 0.85;
+      } catch (e) {}
     }
-    const cycle = secondsSpent % 8;
-    if (cycle < 4) {
-      setBreathingPhase('Inhale Slowly');
-    } else {
-      setBreathingPhase('Exhale Gently');
+  }, [audioPlayer, isMuted]);
+
+  // Sync Play / Pause state with both Audio and Video players
+  useEffect(() => {
+    if (audioPlayer) {
+      try {
+        if (isPlaying) {
+          audioPlayer.play();
+        } else {
+          audioPlayer.pause();
+        }
+      } catch (err) {
+        console.warn('Audio play/pause error:', err?.message || err);
+      }
     }
-  }, [secondsSpent, isPlaying]);
 
-  // Audio Playback Controller
-  const switchAudioTrack = async (trackIndex, playImmediately = false) => {
-    try {
-      if (soundRef.current) {
-        await soundRef.current.stopAsync();
-        await soundRef.current.unloadAsync();
-        soundRef.current = null;
+    if (videoPlayer) {
+      try {
+        if (isPlaying) {
+          videoPlayer.play();
+        } else {
+          videoPlayer.pause();
+        }
+      } catch (err) {
+        console.warn('Video play/pause error:', err?.message || err);
       }
+    }
+  }, [isPlaying, audioPlayer, videoPlayer]);
 
-      const track = SOUNDSCAPES[trackIndex];
-      if (!track) return;
-      const player = await createSafeAudioPlayer(track.source, {
-        loop: true,
-        volume: isMuted ? 0 : 0.85,
-      });
-
-      soundRef.current = player;
-      if (playImmediately) {
-        await player.playAsync();
+  // Handle Audio Track Switch
+  const handleSelectTrack = (index) => {
+    if (index === selectedTrackIndex) return;
+    setSelectedTrackIndex(index);
+    if (audioPlayer) {
+      try {
+        audioPlayer.replace(SOUNDSCAPES[index].source);
+        audioPlayer.loop = true;
+        audioPlayer.volume = isMuted ? 0 : 0.85;
+        if (isPlaying) {
+          audioPlayer.play();
+        }
+      } catch (err) {
+        console.warn('Audio switch error:', err?.message || err);
       }
-    } catch (err) {
-      console.log('Meditation track change error:', err);
     }
   };
 
-  // Play / Pause handling
-  useEffect(() => {
-    const handlePlayState = async () => {
+  // Switch Visual Video Scene
+  const handleSwitchVisual = () => {
+    const nextIndex = (activeSceneIndex + 1) % VISUAL_SCENES.length;
+    setActiveSceneIndex(nextIndex);
+    if (videoPlayer) {
       try {
+        videoPlayer.replace(VISUAL_SCENES[nextIndex].source);
         if (isPlaying) {
-          if (!soundRef.current) {
-            await switchAudioTrack(selectedTrackIndex, true);
-          } else {
-            await soundRef.current.playAsync();
-          }
-        } else {
-          if (soundRef.current) {
-            await soundRef.current.pauseAsync();
-          }
+          videoPlayer.play();
         }
       } catch (err) {
-        console.log('Audio playback state error:', err);
+        console.warn('Video switch error:', err?.message || err);
       }
-    };
-    handlePlayState();
-  }, [isPlaying]);
-
-  // Handle Track Selection
-  const handleSelectTrack = async (index) => {
-    if (index === selectedTrackIndex) return;
-    setSelectedTrackIndex(index);
-    if (isPlaying) {
-      await switchAudioTrack(index, true);
-    } else {
-      await switchAudioTrack(index, false);
     }
   };
 
   // Mute / Unmute
-  const toggleMute = async () => {
+  const toggleMute = () => {
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
-    if (soundRef.current) {
-      await soundRef.current.setMuted(nextMuted);
+    if (audioPlayer) {
+      try {
+        audioPlayer.muted = nextMuted;
+        audioPlayer.volume = nextMuted ? 0 : 0.85;
+      } catch (e) {}
     }
   };
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (soundRef.current) {
-        soundRef.current.stopAsync().catch(() => {});
-        soundRef.current.unloadAsync().catch(() => {});
-        soundRef.current = null;
+      if (audioPlayer) {
+        try {
+          audioPlayer.pause();
+        } catch (e) {}
+      }
+      if (videoPlayer) {
+        try {
+          videoPlayer.pause();
+        } catch (e) {}
       }
     };
-  }, []);
+  }, [audioPlayer, videoPlayer]);
 
   // Backend session activity logging
   const logSessionActivity = async (durationSec) => {
@@ -292,18 +271,20 @@ const MeditationScreen = ({ navigation }) => {
         activity_type: 'Guided Meditation',
         duration_minutes: durationMinutes,
         metadata: {
-          track_name: SOUNDSCAPES[selectedTrackIndex]?.title || 'Ambient Sanctuary'
+          track_name: SOUNDSCAPES[selectedTrackIndex]?.title || 'Ambient Sanctuary',
+          visual_scene: VISUAL_SCENES[activeSceneIndex]?.label,
+          seconds_spent: durationSec,
         }
       });
     } catch (err) {
-      console.log('Meditation activity logging error:', err.message || err);
+      console.log('Meditation activity logging error:', err?.message || err);
     }
   };
 
-  // Timer Tick
+  // Timer Tick & Session Completion
   useEffect(() => {
     let timer = null;
-    if (isPlaying && secondsSpent < TOTAL_DURATION) {
+    if (isPlaying && secondsSpent < sessionDuration) {
       timer = setInterval(() => {
         setSecondsSpent((prev) => {
           const next = prev + 1;
@@ -311,25 +292,30 @@ const MeditationScreen = ({ navigation }) => {
           return next;
         });
       }, 1000);
-    } else if (secondsSpent >= TOTAL_DURATION) {
+    } else if (secondsSpent >= sessionDuration && sessionDuration > 0) {
       setIsPlaying(false);
-      logSessionActivity(TOTAL_DURATION);
+      logSessionActivity(sessionDuration);
       Alert.alert(
         "Sanctuary Completed 🧘",
-        "You have completed your 5-minute mindful decompression session. Autonomic balance restored.",
+        `You have completed your ${Math.round(sessionDuration / 60)}-minute mindful decompression session. Autonomic balance restored.`,
         [{ text: "Complete", onPress: () => setSecondsSpent(0) }]
       );
     }
     return () => clearInterval(timer);
-  }, [isPlaying, secondsSpent]);
+  }, [isPlaying, secondsSpent, sessionDuration]);
 
   // Back Navigation with cleanup
   const handleGoBack = async () => {
     setIsPlaying(false);
-    if (soundRef.current) {
-      await soundRef.current.stopAsync().catch(() => {});
-      await soundRef.current.unloadAsync().catch(() => {});
-      soundRef.current = null;
+    if (audioPlayer) {
+      try {
+        audioPlayer.pause();
+      } catch (e) {}
+    }
+    if (videoPlayer) {
+      try {
+        videoPlayer.pause();
+      } catch (e) {}
     }
     await logSessionActivity(timeSpentRef.current);
     navigation.goBack();
@@ -339,569 +325,576 @@ const MeditationScreen = ({ navigation }) => {
     setIsPlaying(false);
     setSecondsSpent(0);
     timeSpentRef.current = 0;
+    if (audioPlayer) {
+      try {
+        audioPlayer.pause();
+        if (typeof audioPlayer.seekTo === 'function') {
+          audioPlayer.seekTo(0);
+        }
+      } catch (e) {}
+    }
+    if (videoPlayer) {
+      try {
+        videoPlayer.pause();
+      } catch (e) {}
+    }
   };
 
   const handleSkipForward = () => {
-    setSecondsSpent((prev) => Math.min(TOTAL_DURATION, prev + 15));
+    setSecondsSpent((prev) => Math.min(sessionDuration, prev + 15));
   };
 
   const handleSkipBack = () => {
     setSecondsSpent((prev) => Math.max(0, prev - 15));
   };
 
+  const handleSelectDuration = (seconds) => {
+    setSessionDuration(seconds);
+    setSecondsSpent(0);
+    timeSpentRef.current = 0;
+  };
+
   const formatTime = (seconds) => {
-    const clamped = Math.max(0, TOTAL_DURATION - seconds);
+    const clamped = Math.max(0, sessionDuration - seconds);
     const m = Math.floor(clamped / 60);
     const s = clamped % 60;
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  // Circular progress calculations (Radius 88)
-  const circleRadius = 88;
-  const strokeWidth = 10;
-  const circumference = 2 * Math.PI * circleRadius;
-  const progressRatio = Math.min(1, secondsSpent / TOTAL_DURATION);
-  const strokeDashoffset = circumference - (circumference * progressRatio);
-
-  const activeTrack = SOUNDSCAPES[selectedTrackIndex];
+  const renderTrackIcon = (iconName, isSelected) => {
+    const color = isSelected ? '#0D9488' : '#64748B';
+    switch (iconName) {
+      case 'CloudRain':
+        return <CloudRain size={20} color={color} />;
+      case 'Wind':
+        return <Wind size={20} color={color} />;
+      case 'Bell':
+        return <Bell size={20} color={color} />;
+      case 'Waves':
+        return <Waves size={20} color={color} />;
+      default:
+        return <Music size={20} color={color} />;
+    }
+  };
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Top Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={handleGoBack} style={styles.backBtn} activeOpacity={0.8}>
-          <ArrowLeft color="#0D9488" size={22} />
-        </TouchableOpacity>
-        <View style={styles.headerTitleBox}>
-          <Text style={styles.headerTitle}>Audio Sanctuary</Text>
-          <Text style={styles.headerSubtitle}>Guided Mindfulness & Decompression</Text>
-        </View>
-        <TouchableOpacity onPress={toggleMute} style={styles.muteBtn} activeOpacity={0.8}>
-          {isMuted ? (
-            <VolumeX color="#EF4444" size={20} />
-          ) : (
-            <Volume2 color="#0D9488" size={20} />
-          )}
-        </TouchableOpacity>
-      </View>
+    <View style={styles.container}>
+      {/* Ambient Translucent Mint-Teal and Soft Sky-Blue Circles (HomeScreen aesthetic) */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
 
-      <ScrollView 
-        contentContainerStyle={styles.scrollContent} 
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Circular Progress Timer Sanctuary Area */}
-        <View style={styles.timerSanctuaryContainer}>
-          {/* Animated Glow Aura Ring */}
-          <Animated.View 
-            style={[
-              styles.timerAuraGlow, 
-              {
-                transform: [{ scale: pulseAnim }],
-                opacity: isPlaying ? pulseOpacity : 0.15,
-              }
-            ]} 
-          />
-
-          {/* SVG Circular Progress Ring */}
-          <View style={styles.svgWrapper}>
-            <Svg width={230} height={230} viewBox="0 0 230 230">
-              {/* Background Track Circle */}
-              <Circle
-                cx="115"
-                cy="115"
-                r={circleRadius}
-                stroke="#E2E8F0"
-                strokeWidth={strokeWidth}
-                fill="none"
-              />
-              {/* Active Progress Circle */}
-              <Circle
-                cx="115"
-                cy="115"
-                r={circleRadius}
-                stroke="#0D9488"
-                strokeWidth={strokeWidth}
-                strokeDasharray={`${circumference} ${circumference}`}
-                strokeDashoffset={strokeDashoffset}
-                strokeLinecap="round"
-                fill="none"
-                transform="rotate(-90 115 115)"
-              />
-            </Svg>
-
-            {/* Inner Content inside Circular Timer */}
-            <View style={styles.timerInnerContent}>
-              <View style={styles.phaseBadge}>
-                <Text style={styles.phaseBadgeText}>{breathingPhase}</Text>
-              </View>
-              <Text style={styles.countdownText}>{formatTime(secondsSpent)}</Text>
-              <Text style={styles.totalDurationText}>5:00 Session</Text>
-            </View>
+      <SafeAreaView style={styles.safeArea}>
+        {/* Top Header */}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleGoBack} style={styles.backBtn} activeOpacity={0.8}>
+            <ArrowLeft color="#0D9488" size={20} />
+          </TouchableOpacity>
+          <View style={styles.headerTitleBox}>
+            <Text style={styles.headerTitle}>Audio Sanctuary</Text>
+            <Text style={styles.headerSubtitle}>Guided Mindfulness & Decompression</Text>
           </View>
-        </View>
-
-        {/* Current Active Track Banner */}
-        <View style={styles.activeTrackBanner}>
-          <View style={styles.activeTrackLeft}>
-            <View style={styles.activeIconCircle}>
-              <Headphones size={18} color="#0D9488" />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.activeTrackName}>{activeTrack.title}</Text>
-              <Text style={styles.activeTrackCategory}>{activeTrack.subtitle}</Text>
-            </View>
-          </View>
-          <View style={styles.liveIndicator}>
-            <View style={[styles.liveDot, { backgroundColor: isPlaying ? '#0D9488' : '#94A3B8' }]} />
-            <Text style={[styles.liveText, { color: isPlaying ? '#0D9488' : '#94A3B8' }]}>
-              {isPlaying ? 'ACTIVE' : 'PAUSED'}
-            </Text>
-          </View>
-        </View>
-
-        {/* Primary Teal (#0D9488) Playback Controls */}
-        <View style={styles.controlsRow}>
-          <TouchableOpacity 
-            style={styles.secondaryControlBtn} 
-            onPress={handleReset}
-            activeOpacity={0.8}
-          >
-            <RotateCcw size={22} color="#0F766E" />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.secondaryControlBtn} 
-            onPress={handleSkipBack}
-            activeOpacity={0.8}
-          >
-            <SkipBack size={24} color="#0F766E" />
-          </TouchableOpacity>
-
-          {/* Big Teal Play/Pause CTA */}
-          <TouchableOpacity 
-            style={styles.primaryPlayBtn} 
-            onPress={() => setIsPlaying(!isPlaying)}
-            activeOpacity={0.85}
-          >
-            {isPlaying ? (
-              <Pause size={34} color="#FFFFFF" fill="#FFFFFF" />
-            ) : (
-              <Play size={34} color="#FFFFFF" fill="#FFFFFF" style={{ marginLeft: 3 }} />
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.secondaryControlBtn} 
-            onPress={handleSkipForward}
-            activeOpacity={0.8}
-          >
-            <SkipForward size={24} color="#0F766E" />
-          </TouchableOpacity>
-
-          <TouchableOpacity 
-            style={styles.secondaryControlBtn} 
-            onPress={toggleMute}
-            activeOpacity={0.8}
-          >
+          <TouchableOpacity onPress={toggleMute} style={styles.muteBtn} activeOpacity={0.8}>
             {isMuted ? (
-              <VolumeX size={22} color="#EF4444" />
+              <VolumeX color="#EF4444" size={20} />
             ) : (
-              <Volume2 size={22} color="#0F766E" />
+              <Volume2 color="#0D9488" size={20} />
             )}
           </TouchableOpacity>
         </View>
 
-        {/* Multi-Track Selector Component */}
-        <View style={styles.selectorSection}>
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionTitle}>Ambient Soundscapes</Text>
-            <Text style={styles.sectionSubtitle}>Choose neural frequency</Text>
-          </View>
-
-          <View style={styles.tracksList}>
-            {SOUNDSCAPES.map((item, index) => {
-              const isSelected = selectedTrackIndex === index;
+        <ScrollView 
+          contentContainerStyle={styles.scrollContent} 
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Duration Preset Selector Pills */}
+          <View style={styles.durationPresetRow}>
+            {DURATION_PRESETS.map((preset) => {
+              const isSelected = sessionDuration === preset.seconds;
               return (
                 <TouchableOpacity
-                  key={item.id}
+                  key={preset.label}
                   style={[
-                    styles.trackCard,
-                    isSelected && styles.trackCardActive
+                    styles.durationPill,
+                    isSelected && styles.durationPillActive,
                   ]}
-                  onPress={() => handleSelectTrack(index)}
-                  activeOpacity={0.85}
+                  onPress={() => handleSelectDuration(preset.seconds)}
+                  activeOpacity={0.8}
                 >
-                  <View style={[
-                    styles.trackIconWrap,
-                    isSelected && styles.trackIconWrapActive
-                  ]}>
-                    {item.icon === 'Rain' && <CloudRain size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Forest' && <Wind size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Bowls' && <Bell size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Waves' && <Waves size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Wind' && <Wind size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Flame' && <Flame size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Music' && <Music size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                    {item.icon === 'Moon' && <Moon size={20} color={isSelected ? '#0D9488' : '#64748B'} />}
-                  </View>
-
-                  <View style={styles.trackDetails}>
-                    <View style={styles.trackTopRow}>
-                      <Text style={[
-                        styles.trackTitle,
-                        isSelected && styles.trackTitleActive
-                      ]}>
-                        {item.title}
-                      </Text>
-                      {isSelected && (
-                        <View style={styles.activePill}>
-                          <Text style={styles.activePillText}>Selected</Text>
-                        </View>
-                      )}
-                    </View>
-                    <Text style={styles.trackDesc}>{item.subtitle}</Text>
-                  </View>
-
-                  <View style={styles.trackRightIndicator}>
-                    {isSelected ? (
-                      <CheckCircle2 size={22} color="#0D9488" />
-                    ) : (
-                      <View style={styles.inactiveCircle} />
-                    )}
-                  </View>
+                  <Text
+                    style={[
+                      styles.durationPillText,
+                      isSelected && styles.durationPillTextActive,
+                    ]}
+                  >
+                    {preset.label}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
           </View>
-        </View>
 
-        {/* Clinical Note Footer */}
-        <View style={styles.clinicalSanctuaryNotice}>
-          <Clock size={16} color="#0D9488" style={{ marginTop: 2 }} />
-          <Text style={styles.clinicalNoticeText}>
-            Mindful audio pauses down-regulate the sympathetic nervous response and enhance alpha brainwave synchronization during demanding academic blocks.
-          </Text>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+          {/* 1. Immersive Visual Sanctuary Video Card (Tap to cycle visual scenes) */}
+          <TouchableOpacity 
+            style={styles.videoCardContainer}
+            onPress={handleSwitchVisual}
+            activeOpacity={0.95}
+          >
+            <VideoView
+              style={StyleSheet.absoluteFill}
+              player={videoPlayer}
+              contentFit="cover"
+              nativeControls={false}
+            />
+          </TouchableOpacity>
+
+          {/* Soft Frosted White Glass Bar Directly Below Video */}
+          <View style={styles.nowPlayingBar}>
+            <View style={styles.nowPlayingLeft}>
+              <Text style={styles.nowPlayingTitle} numberOfLines={1}>
+                {activeTrack.title}
+              </Text>
+              <View style={styles.nowPlayingStatusRow}>
+                <View 
+                  style={[
+                    styles.statusDot, 
+                    { backgroundColor: isPlaying ? '#0D9488' : '#94A3B8' }
+                  ]} 
+                />
+                <Text 
+                  style={[
+                    styles.statusText, 
+                    { color: isPlaying ? '#0D9488' : '#94A3B8' }
+                  ]}
+                >
+                  {isPlaying ? 'Playing' : 'Paused'}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.nowPlayingRight}>
+              <Text style={styles.nowPlayingTimer}>
+                {formatTime(secondsSpent)}
+              </Text>
+            </View>
+          </View>
+
+          {/* Primary Teal Playback Controls Row */}
+          <View style={styles.controlsRow}>
+            <TouchableOpacity 
+              style={styles.secondaryControlBtn} 
+              onPress={handleReset}
+              activeOpacity={0.8}
+            >
+              <RotateCcw size={20} color="#0F766E" />
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.secondaryControlBtn} 
+              onPress={handleSkipBack}
+              activeOpacity={0.8}
+            >
+              <SkipBack size={22} color="#0F766E" />
+            </TouchableOpacity>
+
+            {/* Big Teal Play/Pause CTA */}
+            <TouchableOpacity 
+              style={styles.primaryPlayBtn} 
+              onPress={() => setIsPlaying(!isPlaying)}
+              activeOpacity={0.85}
+            >
+              {isPlaying ? (
+                <Pause size={30} color="#FFFFFF" fill="#FFFFFF" />
+              ) : (
+                <Play size={30} color="#FFFFFF" fill="#FFFFFF" style={{ marginLeft: 3 }} />
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.secondaryControlBtn} 
+              onPress={handleSkipForward}
+              activeOpacity={0.8}
+            >
+              <SkipForward size={22} color="#0F766E" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Soundscapes List (Soft Frosted White Glass Cards) */}
+          <View style={styles.soundscapeSection}>
+            <Text style={styles.sectionHeaderTitle}>Curated Soundscapes</Text>
+            <Text style={styles.sectionHeaderSubtitle}>
+              Tap to switch ambient audio backdrop for mindful immersion
+            </Text>
+
+            <View style={styles.soundscapeList}>
+              {SOUNDSCAPES.map((item, index) => {
+                const isSelected = index === selectedTrackIndex;
+                return (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[
+                      styles.soundscapeCard,
+                      isSelected && styles.soundscapeCardActive,
+                    ]}
+                    onPress={() => handleSelectTrack(index)}
+                    activeOpacity={0.82}
+                  >
+                    <View style={[styles.soundscapeIconBox, isSelected && styles.soundscapeIconBoxActive]}>
+                      {renderTrackIcon(item.icon, isSelected)}
+                    </View>
+                    <View style={styles.soundscapeInfo}>
+                      <View style={styles.soundscapeTitleRow}>
+                        <Text style={[styles.soundscapeTitle, isSelected && styles.soundscapeTitleActive]}>
+                          {item.title}
+                        </Text>
+                        <View style={[styles.soundscapeCategoryPill, isSelected && styles.soundscapeCategoryPillActive]}>
+                          <Text style={[styles.soundscapeCategoryText, isSelected && styles.soundscapeCategoryTextActive]}>
+                            {item.category}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={styles.soundscapeSubtitle}>{item.subtitle}</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#EDF5F4',
   },
+  safeArea: {
+    flex: 1,
+  },
+
+  // Ambient Translucent Mint-Teal & Soft Sky-Blue Circles (HomeScreen aesthetic)
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(45, 212, 191, 0.24)',
+  },
+  ambientOrbMiddle: {
+    position: 'absolute',
+    top: 360,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.20)',
+  },
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: 100,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(56, 189, 248, 0.18)',
+  },
+
+  // Header Bar
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E2E8F0',
-    backgroundColor: '#FFFFFF',
   },
   backBtn: {
-    padding: 8,
-    borderRadius: 12,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
   },
   headerTitleBox: {
     alignItems: 'center',
   },
   headerTitle: {
-    fontSize: 17,
+    fontSize: 18,
     fontWeight: '800',
     color: '#0F172A',
+    letterSpacing: -0.3,
   },
   headerSubtitle: {
-    fontSize: 11,
+    fontSize: 11.5,
     color: '#64748B',
-    fontWeight: '500',
-    marginTop: 1,
-  },
-  muteBtn: {
-    padding: 8,
-    borderRadius: 12,
-    backgroundColor: '#F1F5F9',
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 40,
-  },
-  timerSanctuaryContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginVertical: 12,
-    height: 250,
-  },
-  timerAuraGlow: {
-    position: 'absolute',
-    width: 220,
-    height: 220,
-    borderRadius: 110,
-    backgroundColor: '#CCFBF1',
-  },
-  svgWrapper: {
-    width: 230,
-    height: 230,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  timerInnerContent: {
-    position: 'absolute',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  phaseBadge: {
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 16,
-    marginBottom: 6,
-  },
-  phaseBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#0D9488',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  countdownText: {
-    fontSize: 42,
-    fontWeight: '800',
-    color: '#0F766E',
-    letterSpacing: -1,
-  },
-  totalDurationText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#94A3B8',
     marginTop: 2,
   },
-  activeTrackBanner: {
+  muteBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 40,
+  },
+
+  // Duration Preset Pills
+  durationPresetRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  durationPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 1,
+  },
+  durationPillActive: {
+    backgroundColor: '#0D9488',
+    borderColor: '#0D9488',
+    shadowColor: '#0D9488',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  durationPillText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  durationPillTextActive: {
+    color: '#FFFFFF',
+  },
+
+  // 1. Immersive Visual Sanctuary Video Card
+  videoCardContainer: {
+    width: '100%',
+    height: 195,
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    marginTop: 10,
+    marginBottom: 10,
+    position: 'relative',
+    backgroundColor: '#0F172A',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  nowPlayingBar: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 18,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginBottom: 20,
-    elevation: 1,
+    marginBottom: 14,
     shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
   },
-  activeTrackLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  nowPlayingLeft: {
     flex: 1,
-    marginRight: 10,
-  },
-  activeIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#F0FDFA',
-    alignItems: 'center',
-    justifyContent: 'center',
     marginRight: 12,
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
   },
-  activeTrackName: {
-    fontSize: 14,
+  nowPlayingTitle: {
+    fontSize: 14.5,
     fontWeight: '700',
-    color: '#1E293B',
+    color: '#0F172A',
+    marginBottom: 3,
   },
-  activeTrackCategory: {
-    fontSize: 12,
-    color: '#64748B',
-    marginTop: 1,
-  },
-  liveIndicator: {
+  nowPlayingStatusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F8FAFC',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
-    gap: 5,
   },
-  liveDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 6,
   },
-  liveText: {
-    fontSize: 10,
+  statusText: {
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  nowPlayingRight: {
+    alignItems: 'flex-end',
+  },
+  nowPlayingTimer: {
+    fontSize: 18,
     fontWeight: '800',
+    color: '#0D9488',
     letterSpacing: 0.5,
   },
+
+  // Playback Controls Row
   controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 16,
-    marginBottom: 26,
+    marginBottom: 20,
   },
   secondaryControlBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: '#FFFFFF',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
     borderWidth: 1.5,
-    borderColor: '#E2E8F0',
+    borderColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 1,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
   },
   primaryPlayBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: '#0D9488',
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 4,
     shadowColor: '#0D9488',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.35,
-    shadowRadius: 8,
+    shadowRadius: 10,
+    elevation: 4,
   },
-  selectorSection: {
-    marginTop: 6,
-    marginBottom: 20,
+
+  // Soundscape List Section
+  soundscapeSection: {
+    marginTop: 4,
   },
-  sectionHeaderRow: {
-    marginBottom: 12,
-  },
-  sectionTitle: {
+  sectionHeaderTitle: {
     fontSize: 16,
     fontWeight: '800',
     color: '#0F172A',
+    letterSpacing: -0.2,
   },
-  sectionSubtitle: {
+  sectionHeaderSubtitle: {
     fontSize: 12,
     color: '#64748B',
     marginTop: 2,
+    marginBottom: 12,
   },
-  tracksList: {
+  soundscapeList: {
     gap: 10,
   },
-  trackCard: {
+  soundscapeCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 14,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    elevation: 1,
     shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.03,
-    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
   },
-  trackCardActive: {
+  soundscapeCardActive: {
     borderColor: '#0D9488',
     backgroundColor: '#F0FDFA',
   },
-  trackIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
+  soundscapeIconBox: {
+    width: 40,
+    height: 40,
+    borderRadius: 16,
     backgroundColor: '#F1F5F9',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
-    flexShrink: 0,
   },
-  trackIconWrapActive: {
+  soundscapeIconBoxActive: {
     backgroundColor: '#CCFBF1',
   },
-  trackDetails: {
+  soundscapeInfo: {
     flex: 1,
-    marginRight: 8,
   },
-  trackTopRow: {
+  soundscapeTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 6,
+    marginBottom: 2,
   },
-  trackTitle: {
-    flex: 1,
+  soundscapeTitle: {
     fontSize: 13.5,
     fontWeight: '700',
-    color: '#1E293B',
-    marginRight: 6,
+    color: '#0F172A',
+    flex: 1,
+    marginRight: 8,
   },
-  trackTitleActive: {
-    color: '#0F766E',
-    fontWeight: '800',
+  soundscapeTitleActive: {
+    color: '#0D9488',
   },
-  trackDesc: {
+  soundscapeCategoryPill: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  soundscapeCategoryPillActive: {
+    backgroundColor: '#CCFBF1',
+  },
+  soundscapeCategoryText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  soundscapeCategoryTextActive: {
+    color: '#0D9488',
+  },
+  soundscapeSubtitle: {
     fontSize: 11.5,
     color: '#64748B',
-    marginTop: 2,
-  },
-  activePill: {
-    backgroundColor: '#0D9488',
-    paddingHorizontal: 8,
-    paddingVertical: 2.5,
-    borderRadius: 8,
-    flexShrink: 0,
-    alignSelf: 'center',
-  },
-  activePillText: {
-    fontSize: 9.5,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    letterSpacing: 0.2,
-  },
-  trackRightIndicator: {
-    marginLeft: 4,
-    flexShrink: 0,
-  },
-  inactiveCircle: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: '#CBD5E1',
-  },
-  clinicalSanctuaryNotice: {
-    flexDirection: 'row',
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    borderRadius: 14,
-    padding: 14,
-    gap: 10,
-    alignItems: 'flex-start',
-  },
-  clinicalNoticeText: {
-    flex: 1,
-    fontSize: 12,
-    color: '#0F766E',
-    lineHeight: 18,
-    fontWeight: '500',
   },
 });
 

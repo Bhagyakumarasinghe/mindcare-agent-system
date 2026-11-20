@@ -4,10 +4,10 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from app.db.mongo import db
-from app.routers.protected_routes import get_current_user
+from app.routers.protected_routes import get_current_user, get_current_user_flexible
 from bson import ObjectId
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 from google import genai
 
@@ -28,7 +28,54 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = []
 
 class AssessmentRequest(BaseModel):
-    history: List[Dict[str, Any]]
+    history: Optional[List[Dict[str, Any]]] = None
+
+class NextQuestionRequest(BaseModel):
+    stepIndex: Optional[int] = Field(default=1, description="Target question step index (1 to 9)")
+    previousAnswers: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Answers recorded so far")
+    lastQuestion: Optional[str] = Field(default="", description="Question text of previous step")
+    lastLikertLabel: Optional[str] = Field(default="", description="Selected Likert label from previous step")
+    lastAnswerText: Optional[str] = Field(default="", description="User reflection text from previous step")
+    history: Optional[List[Dict[str, Any]]] = Field(default=None, description="Backwards compatibility for legacy caller")
+
+# Cohen's PSS-8 Psychometric Constructs for Adaptive Steps 2 through 8 (stepIndex 1 to 7)
+PSYCHOMETRIC_CONSTRUCTS = {
+    1: {
+        "construct": "Control & Agency",
+        "category": "Control & Agency",
+        "baseline": "Over the past few days, how often have you felt unable to control the important things in your life?"
+    },
+    2: {
+        "construct": "Nervous Arousal",
+        "category": "Nervous Arousal",
+        "baseline": "Over the past few days, how often have you felt nervous, stressed, or emotionally overloaded?"
+    },
+    3: {
+        "construct": "Coping Confidence",
+        "category": "Coping Confidence",
+        "baseline": "Over the past few days, how often have you felt confident in your ability to handle personal challenges?"
+    },
+    4: {
+        "construct": "Life Trajectory",
+        "category": "Life Trajectory",
+        "baseline": "Over the past few days, how often have you felt that things were moving smoothly in your direction?"
+    },
+    5: {
+        "construct": "Irritability Control",
+        "category": "Workload Coping",
+        "baseline": "Over the past few days, how often have you found that you could not cope with all the tasks you had to do?"
+    },
+    6: {
+        "construct": "Mastery & Dominance",
+        "category": "Irritation Regulation",
+        "baseline": "Over the past few days, how often have you been able to control irritations in your daily life?"
+    },
+    7: {
+        "construct": "Emotional Resilience",
+        "category": "Self-Efficacy",
+        "baseline": "Over the past few days, how often have you felt on top of your responsibilities and in control?"
+    }
+}
 
 class ProfileUpdate(BaseModel):
     name: str
@@ -83,20 +130,20 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        insights = get_user_insights(current_user["id"])
-        summary = get_user_mental_health_summary(current_user["id"])
-        real_entries = summary.get("entries_count", 0)
-        real_stress = summary.get("avg_stress", 0.0)
+        full_name = user.get("full_name") or user.get("name") or "User"
 
         return {
             "id": str(user["_id"]),
-            "name": user["name"],
-            "email": user["email"],
+            "user_id": str(user["_id"]),
+            "name": full_name,
+            "full_name": full_name,
+            "email": user.get("email", ""),
             "days_active": user.get("days_active", 1),
-            "entries_count": real_entries if real_entries > 0 else user.get("entries_count", 0),
+            "entries_count": user.get("entries_count", 0),
             "insights": {
-                **insights,
-                "avg_stress": str(real_stress)
+                "mood_history": [],
+                "assessment_history": [],
+                "avg_stress": "0.0"
             }
         }
     except Exception as e:
@@ -107,16 +154,19 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
 async def update_profile(data: ProfileUpdate, current_user: dict = Depends(get_current_user)):
     try:
         user_id = ObjectId(current_user["id"])
+        new_name = data.name.strip()
         result = await db.users.update_one(
             {"_id": user_id}, 
-            {"$set": {"name": data.name.strip()}}
+            {"$set": {"name": new_name, "full_name": new_name}}
         )
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="User record not found")
         return {
             "status": "success", 
             "message": "Profile updated successfully",
-            "updated_name": data.name
+            "updated_name": new_name,
+            "name": new_name,
+            "full_name": new_name
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
@@ -128,20 +178,115 @@ async def logout(current_user: dict = Depends(get_current_user)):
 
 # --- 6. Separate Assessment Endpoint ---
 @router.post("/assessment/next-question")
-async def assessment_handler(data: AssessmentRequest, current_user: dict = Depends(get_current_user)):
+async def assessment_handler(data: NextQuestionRequest, current_user: dict = Depends(get_current_user)):
     """
-    Endpoint dedicated to adaptive psychological check-in questions.
+    Real-time Gemini Adaptive Question Generation for Steps 2 through 8 (stepIndex 1 to 7),
+    and ML Biometric Feature Extraction for Steps 9 and 10 (stepIndex 8 and 9).
     """
     user_id = str(current_user["id"])
-    try:
-        reply = get_next_question(user_id, data.history)
+
+    # Backwards-compatibility check for legacy callers passing { history: [...] } without stepIndex
+    if data.history is not None and data.stepIndex is None:
+        try:
+            reply = get_next_question(user_id, data.history)
+            return {"status": "success", "question": reply.get("question")}
+        except Exception as e:
+            print(f"❌ Legacy assessment API error: {e}")
+            raise HTTPException(status_code=500, detail="Assessment failed")
+
+    stepIndex = int(data.stepIndex if data.stepIndex is not None else 1)
+
+    # 1. Steps 9 & 10 (stepIndex 8 & 9): ML Model Biometric Habit Inputs
+    if stepIndex == 8:
+        print(f"[ML Feature Input Q{stepIndex + 1}] Collecting biometric habit feature for stress_model.pkl (Sleep_Hours_Per_Day)")
         return {
-            "status": "success", 
-            "question": reply.get("question")
+            "status": "success",
+            "stepIndex": 8,
+            "category": "Sleep Architecture",
+            "question": "How many hours of sleep did you get last night?",
+            "options": ["< 5 hours", "5 - 6 hours", "7 - 8 hours", "> 8 hours"],
+            "source": "ml_feature_extractor",
+            "feature": "Sleep_Hours_Per_Day"
+        }
+    elif stepIndex == 9:
+        print(f"[ML Feature Input Q{stepIndex + 1}] Collecting biometric habit feature for stress_model.pkl (Study_Hours_Per_Day)")
+        return {
+            "status": "success",
+            "stepIndex": 9,
+            "category": "Focus & Academic Load",
+            "question": "Daily focused study or work duration?",
+            "options": ["< 4 hours", "4 - 6 hours", "6 - 8 hours", "> 8 hours"],
+            "source": "ml_feature_extractor",
+            "feature": "Study_Hours_Per_Day"
+        }
+
+    # 2. Steps 2 through 8 (stepIndex 1 to 7): Gemini Adaptive Psychometric Questions
+    construct_info = PSYCHOMETRIC_CONSTRUCTS.get(stepIndex, {
+        "construct": "Emotional Resilience",
+        "category": "Self-Efficacy",
+        "baseline": "Over the past few days, how often have you felt on top of your responsibilities and in control?"
+    })
+    baseline_q = construct_info["baseline"]
+
+    try:
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_api_key:
+            raise ValueError("Gemini API Key missing")
+
+        client = genai.Client(api_key=gemini_api_key, http_options={'timeout': 30000})
+        student_input = (data.lastAnswerText or data.lastLikertLabel or "Sometimes").strip()
+        prompt = f"""Role: Clinical Psychometric Specialist.
+Task: Adapt the next Cohen's PSS question for student mental health check-in.
+Construct: "{construct_info['construct']}"
+Baseline: "{baseline_q}"
+Student's Previous Response: "{student_input}"
+
+Generate ONE concise, empathetic adapted question assessing "{construct_info['construct']}" that bridges from their previous answer.
+Must start with "Over the past few days, how often..." and be answerable with: Never, Almost Never, Sometimes, Fairly Often, Very Often (12-22 words).
+
+Return strictly JSON:
+{{"question": "Your single sentence adapted question here"}}
+"""
+        def _call_gemini():
+            return client.models.generate_content(
+                model="gemini-flash-lite-latest",
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "max_output_tokens": 80,
+                    "temperature": 0.5
+                }
+            )
+
+        response = await asyncio.wait_for(asyncio.to_thread(_call_gemini), timeout=15.0)
+        raw = response.text.strip()
+        if "```" in raw:
+            raw = raw.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(raw)
+        adapted_question = parsed.get("question")
+        if not adapted_question or not isinstance(adapted_question, str) or len(adapted_question.strip()) < 10:
+            raise ValueError("Invalid adapted question returned by Gemini")
+
+        adapted_question = adapted_question.strip()
+        print(f"[Gemini Adaptive Q{stepIndex + 1}] Generated dynamic question: {adapted_question}")
+        return {
+            "status": "success",
+            "stepIndex": stepIndex,
+            "category": construct_info["category"],
+            "question": adapted_question,
+            "options": ["Never", "Almost Never", "Sometimes", "Fairly Often", "Very Often"],
+            "source": "gemini_adaptive"
         }
     except Exception as e:
-        print(f"❌ Assessment API error: {e}")
-        raise HTTPException(status_code=500, detail="Assessment failed")
+        print(f"[Gemini Fallback Q{stepIndex + 1}] Fallback applied ({type(e).__name__}): {e}")
+        return {
+            "status": "success",
+            "stepIndex": stepIndex,
+            "category": construct_info["category"],
+            "question": baseline_q,
+            "options": ["Never", "Almost Never", "Sometimes", "Fairly Often", "Very Often"],
+            "source": "gemini_fallback"
+        }
 
 # --- 7. Pure AI Chat Endpoint ---
 @router.post("/chat")
@@ -186,54 +331,143 @@ async def ai_chat_handler(data: ChatRequest, current_user: dict = Depends(get_cu
         return response_payload
     
     try:
-        reply = get_therapy_response(user_id, user_message)
+        therapy_result = get_therapy_response(user_id, user_message, history=data.history or [])
+        reply_val = therapy_result.get("reply") if isinstance(therapy_result, dict) else str(therapy_result)
             
         return {
             "status": "success", 
             "crisis_triggered": False,
-            "intent": "THERAPY", 
-            "reply": reply
+            "intent": therapy_result.get("intent", "THERAPY") if isinstance(therapy_result, dict) else "THERAPY",
+            "agent_used": therapy_result.get("agent_used", "Profiling & Therapy Agent") if isinstance(therapy_result, dict) else "Profiling & Therapy Agent",
+            "suggested_tool": therapy_result.get("suggested_tool") if isinstance(therapy_result, dict) else None,
+            "mood": therapy_result.get("mood", "Neutral") if isinstance(therapy_result, dict) else "Neutral",
+            "thought_identification": therapy_result.get("thought_identification") if isinstance(therapy_result, dict) else None,
+            "reality_check": therapy_result.get("reality_check") if isinstance(therapy_result, dict) else None,
+            "cognitive_reframe": therapy_result.get("cognitive_reframe") if isinstance(therapy_result, dict) else None,
+            "reply": reply_val
         }
     except Exception as e:
         print(f"❌ Chat Agent error: {e}")
         raise HTTPException(status_code=500, detail="AI Chat failed")   
 
+def generate_fallback_micro_reflection(mood: str, energy: str, emotion_tags: List[str]) -> str:
+    """Provides a deterministic, clinical fallback reflection if Gemini API is unreachable or times out."""
+    tags_str = f"feeling {', '.join(emotion_tags).lower()}" if emotion_tags else "taking time for this check-in"
+    if energy == "Drained" or mood in ["Bad", "Terrible"]:
+        return f"It is completely valid to feel low on energy while {tags_str}. Give yourself permission to pause, protect your cognitive boundaries, and recharge without guilt."
+    elif energy == "Energized" or mood in ["Great", "Good"]:
+        return f"Your energy and focus are in a constructive rhythm right now as you feel {', '.join(emotion_tags).lower() if emotion_tags else 'balanced'}. Channel this clarity into your university priorities while pacing yourself mindfully."
+    else:
+        return f"Acknowledging your steady state while {tags_str} builds durable mental resilience. Maintain this calm cadence and take intentional micro-breaks between study blocks."
+
 # --- 8. Mood Tracking Endpoint ---
 @router.post("/mood-log")
-async def log_user_mood(data: MoodEntryRequest, current_user: dict = Depends(get_current_user)):
-    """Saves daily mood and stress tracking data to MongoDB and Neo4j graph."""
+async def log_user_mood(data: MoodEntryRequest, current_user: Optional[dict] = Depends(get_current_user_flexible)):
+    """Saves daily mood and reflection tracking data to MongoDB and Neo4j graph without synthetic stress."""
     try:
-        user_id = str(current_user["id"])
-        stress_val = data.stress_score if data.stress_score is not None else (data.stress_level if data.stress_level is not None else 5)
-        journal_note_val = data.journal_note if data.journal_note is not None and data.journal_note != "" else (data.note or "")
-        
-        # 1. Log complete history entry to MongoDB
+        user_id = (
+            str(current_user["id"])
+            if (current_user and "id" in current_user)
+            else (str(data.user_id) if data.user_id else "demo_user")
+        )
+        # Stress is purely derived from clinical assessment or mood index; safely cast to float
+        stress_val = data.stress_score if data.stress_score is not None else data.stress_level
+        if stress_val is not None:
+            stress_val = round(float(stress_val), 1)
+
+        journal_note_val = (
+            data.journal_note
+            if data.journal_note is not None and data.journal_note != ""
+            else (data.notes or data.note or "")
+        )
+        sleep_hours_val = float(data.sleep_hours) if data.sleep_hours is not None else 7.0
+        emotion_tags_val = [str(e) for e in (data.emotion_tags or [])]
+        energy_level_val = str(data.energy_level or "Steady")
+        stress_factors_val = [str(sf) for sf in (data.stress_factors or []) if str(sf).strip()]
+        if not stress_factors_val and data.stress_factor and data.stress_factor != "None":
+            stress_factors_val = [data.stress_factor]
+        stress_factor_primary = stress_factors_val[0] if stress_factors_val else (data.stress_factor or "None")
+        activities_val = [str(a) for a in (data.activities or []) if str(a).strip()]
+
+        # 1. Generate empathetic Gemini AI Micro-Reflection
+        micro_reflection = generate_fallback_micro_reflection(data.mood, energy_level_val, emotion_tags_val)
+        try:
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if gemini_api_key:
+                client = genai.Client(api_key=gemini_api_key, http_options={'timeout': 30000})
+                activities_str = ", ".join(activities_val) if activities_val else "General Daily Routine"
+                emotions_str = ", ".join(emotion_tags_val) if emotion_tags_val else "Reflective"
+                triggers_str = ", ".join(stress_factors_val) if stress_factors_val else "None reported"
+                reflection_prompt = f"""Role: Empathetic Clinical Psychologist & University Mental Health Coach.
+The student logged a daily mood check-in:
+- Overall Mood: {data.mood}
+- Affect / Emotion Labels: {emotions_str}
+- Mental Energy Level: {energy_level_val}
+- Rest & Sleep: {sleep_hours_val} hours last night
+- Active Stress Triggers: {triggers_str}
+- Activities: {activities_str}
+- Journal Note: {journal_note_val or 'None'}
+
+Provide exactly 2 concise, compassionate, and clinically insightful sentences tailored directly to their current energy, sleep, triggers, and affective state. Validate their emotional reality and offer an actionable, grounding perspective for their university day. Do NOT use bullet points, markdown formatting, quotes, or emojis. Return only the 2 sentences."""
+
+                def _call_gemini_reflection():
+                    return client.models.generate_content(
+                        model="gemini-flash-lite-latest",
+                        contents=reflection_prompt,
+                        config={
+                            "max_output_tokens": 90,
+                            "temperature": 0.6,
+                        }
+                    )
+
+                gemini_res = await asyncio.wait_for(asyncio.to_thread(_call_gemini_reflection), timeout=12.0)
+                if gemini_res and gemini_res.text and len(gemini_res.text.strip()) > 15:
+                    cleaned_text = gemini_res.text.strip().replace('"', '').replace('\n', ' ')
+                    micro_reflection = cleaned_text
+                    print(f"✅ [Gemini Micro-Reflection] Generated: {micro_reflection}")
+        except Exception as ge:
+            print(f"⚠️ [Gemini Micro-Reflection Fallback] ({type(ge).__name__}): {ge}")
+
+        # 2. Log complete history entry to MongoDB
         mood_log_entry = {
             "user_id": user_id,
             "timestamp": datetime.utcnow(),
             "mood": data.mood,
+            "mood_score": data.mood_score if data.mood_score is not None else 3.0,
+            "emotion_tags": emotion_tags_val,
+            "energy_level": energy_level_val,
             "stress_score": stress_val,
             "stress_level": stress_val,
-            "activities": data.activities,
-            "stress_factor": data.stress_factor or "None",
-            "sleep_hours": data.sleep_hours,
+            "activities": activities_val,
+            "stress_factors": stress_factors_val,
+            "stress_factor": stress_factor_primary,
+            "sleep_hours": sleep_hours_val,
             "journal_note": journal_note_val,
-            "note": journal_note_val
+            "note": journal_note_val,
+            "notes": journal_note_val,
+            "micro_reflection": micro_reflection
         }
         await db.mood_logs.insert_one(mood_log_entry)
         
-        # 2. Update Neo4j Graph for analytics as requested
+        # 3. Update Neo4j Graph for analytics
         save_mood_entry_to_graph(
             user_id=user_id,
             mood=data.mood,
             stress_score=stress_val,
-            sleep_hours=data.sleep_hours,
-            activities=data.activities,
-            stress_factor=data.stress_factor or "None",
-            journal_note=journal_note_val
+            sleep_hours=sleep_hours_val,
+            activities=activities_val,
+            stress_factor=stress_factor_primary,
+            journal_note=journal_note_val,
+            emotion_tags=emotion_tags_val,
+            energy_level=energy_level_val,
+            stress_factors=stress_factors_val
         )
         
-        return {"status": "success", "message": "Mood entry logged successfully"}
+        return {
+            "status": "success",
+            "message": "Mood entry logged successfully",
+            "micro_reflection": micro_reflection
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -264,7 +498,7 @@ Their most recently logged mood state was: {recent_mood or 'neutral'}.
 Generate a concise, warm, professional 2-sentence clinical check-in greeting acknowledging their ongoing journey, asking how they have been coping over the past few days, and encouraging honest reflection."""
             try:
                 gemini_api_key = os.getenv("GEMINI_API_KEY")
-                client = genai.Client(api_key=gemini_api_key)
+                client = genai.Client(api_key=gemini_api_key, http_options={'timeout': 30000})
                 response = client.models.generate_content(
                     model="gemini-flash-lite-latest",
                     contents=prompt
@@ -405,7 +639,7 @@ async def evaluate_assessment_response(data: EvaluateResponseRequest, current_us
         if not gemini_api_key:
             raise ValueError("Gemini API Key missing")
         
-        client = genai.Client(api_key=gemini_api_key)
+        client = genai.Client(api_key=gemini_api_key, http_options={'timeout': 30000})
         prompt = f"""Role: Clinical Psychology NLP Scorer.
 Task: Evaluate the student's free-form description for the following Perceived Stress Scale question:
 Question: "{data.question}"

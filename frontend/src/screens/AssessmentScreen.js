@@ -7,8 +7,10 @@ import {
   ScrollView, 
   TextInput,
   ActivityIndicator, 
-  Alert 
+  Alert,
+  Image
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
   ArrowLeft, 
@@ -20,15 +22,15 @@ import {
   ShieldCheck,
   Send,
   MessageSquare,
-  HeartPulse,
-  Settings
+  HeartPulse
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { 
   predictAndRecordStress, 
   getUserProfile, 
   getAssessmentContext, 
-  evaluateAssessmentResponse 
+  evaluateAssessmentResponse,
+  getNextQuestion
 } from '../api/authService';
 
 const PSS_QUESTIONS = [
@@ -106,42 +108,19 @@ const PSS_QUESTIONS = [
   }
 ];
 
-export const alignPssToStressCategory = (pssScore, stressCategory) => {
+export const alignPssToStressCategory = (pssScore) => {
   const numeric = typeof pssScore === 'number' ? pssScore : parseFloat(pssScore) || 5.0;
-  const category = (stressCategory || 'Moderate').trim();
-
-  if (category === 'High') {
-    // High bracket: strictly > 6.5/10 (e.g. 6.8 - 9.5)
-    if (numeric <= 6.5) {
-      const aligned = 6.8 + (numeric / 6.5) * 2.4;
-      return Math.round(Math.min(9.5, Math.max(6.8, aligned)) * 10) / 10;
-    }
-    return Math.min(10.0, Math.max(6.6, Math.round(numeric * 10) / 10));
-  } else if (category === 'Low') {
-    // Low bracket: <= 3.5/10 (e.g. 1.0 - 3.4)
-    if (numeric > 3.5) {
-      const aligned = 1.2 + (numeric / 10.0) * 2.0;
-      return Math.round(Math.min(3.4, Math.max(1.2, aligned)) * 10) / 10;
-    }
-    return Math.min(3.5, Math.max(0.5, Math.round(numeric * 10) / 10));
-  } else {
-    // Moderate bracket: 3.5 to 6.5/10
-    if (numeric < 3.5) {
-      return 4.2;
-    }
-    if (numeric > 6.5) {
-      return 6.2;
-    }
-    return Math.round(numeric * 10) / 10;
-  }
+  return Math.round(numeric * 10) / 10;
 };
 
 export default function AssessmentScreen({ navigation }) {
+  const [questions, setQuestions] = useState(PSS_QUESTIONS);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [scores, setScores] = useState({});
   const [textNotes, setTextNotes] = useState({});
   const [isEvaluatingText, setIsEvaluatingText] = useState(false);
+  const [isAdaptingNext, setIsAdaptingNext] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [assessmentResult, setAssessmentResult] = useState(null);
   const [currentUserId, setCurrentUserId] = useState("demo_user");
@@ -151,8 +130,8 @@ export default function AssessmentScreen({ navigation }) {
   const [checkinMessage, setCheckinMessage] = useState(null);
   const [loadingContext, setLoadingContext] = useState(true);
 
-  const totalQuestions = PSS_QUESTIONS.length;
-  const currentQ = PSS_QUESTIONS[currentStepIndex];
+  const totalQuestions = questions.length;
+  const currentQ = questions[currentStepIndex] || PSS_QUESTIONS[currentStepIndex];
   const isPsychometricStep = currentStepIndex < 8; // Q1 to Q8
   const progressPercent = ((currentStepIndex + 1) / totalQuestions) * 100;
 
@@ -254,6 +233,39 @@ export default function AssessmentScreen({ navigation }) {
     }
 
     if (currentStepIndex < totalQuestions - 1) {
+      const nextStepIdx = currentStepIndex + 1;
+
+      // Real-time Gemini Adaptive Question Generation for Steps 2 through 8 (stepIndex 1 to 7)
+      if (nextStepIdx <= 7) {
+        try {
+          setIsAdaptingNext(true);
+          const nextQRes = await getNextQuestion({
+            stepIndex: nextStepIdx,
+            previousAnswers: updatedAnswers,
+            lastQuestion: currentQ.question,
+            lastLikertLabel: updatedAnswers[currentStepIndex] || selectedOption || "Sometimes",
+            lastAnswerText: currentText.trim()
+          }, { timeout: 16000 });
+
+          if (nextQRes?.data?.status === "success" && nextQRes.data.question) {
+            setQuestions(prev => {
+              const copy = [...prev];
+              copy[nextStepIdx] = {
+                ...copy[nextStepIdx],
+                question: nextQRes.data.question,
+                category: nextQRes.data.category || copy[nextStepIdx].category
+              };
+              return copy;
+            });
+          }
+        } catch (adaptErr) {
+          console.log("Adaptive question generation fallback:", adaptErr);
+          // Gracefully retains baseline validated PSS question
+        } finally {
+          setIsAdaptingNext(false);
+        }
+      }
+
       setCurrentStepIndex(prev => prev + 1);
     } else {
       // Step 10 submission: execute ML inference and Neo4j recording
@@ -296,13 +308,16 @@ export default function AssessmentScreen({ navigation }) {
       const sleepVal = PSS_QUESTIONS[8].mapping[sleepSelection] || 7.0;
       const studyVal = PSS_QUESTIONS[9].mapping[studySelection] || 5.0;
 
+      const userReflections = Object.values(textNotes).filter(t => typeof t === 'string' && t.trim().length > 0);
+
       const payload = {
         user_id: currentUserId,
         study_hours: studyVal,
         extracurricular_hours: 2.0,
         sleep_hours: sleepVal,
         physical_activity_hours: 1.5,
-        pss_score: computedPss
+        pss_score: computedPss,
+        reflections: userReflections
       };
 
       console.log("Submitting ML & Graph assessment payload:", payload);
@@ -310,15 +325,20 @@ export default function AssessmentScreen({ navigation }) {
       const data = response.data;
 
       if (data.status === "success") {
-        const predictedCategory = data.predicted_stress || "Moderate";
-        // Ensure displayed Scaled PSS Index aligns with stress category (> 6.5 for High)
-        const finalPssScore = alignPssToStressCategory(computedPss, predictedCategory);
+        const predictedCategory = data.stress_level || data.predicted_stress || "Moderate";
+        const finalPssScore = data.scaled_pss_score !== undefined && data.scaled_pss_score !== null
+          ? Number(data.scaled_pss_score)
+          : data.pss_score !== undefined && data.pss_score !== null
+          ? Number(data.pss_score)
+          : computedPss;
 
         const resultData = {
           predicted_stress: predictedCategory,
+          stress_level: predictedCategory,
           confidence: data.confidence,
           assessment_id: data.assessment_id,
           pss_score: finalPssScore,
+          scaled_pss_score: finalPssScore,
           recommendations: data.recommendations || [],
           study_hours: studyVal,
           sleep_hours: sleepVal,
@@ -335,14 +355,16 @@ export default function AssessmentScreen({ navigation }) {
       console.error("ML Assessment submission fallback:", error);
       // Fallback result to maintain continuous clinical flow
       const fallbackCategory = "Moderate";
-      const fallbackPss = alignPssToStressCategory(5.5, fallbackCategory);
+      const fallbackPss = computedPss;
       const fallbackResult = {
         predicted_stress: fallbackCategory,
+        stress_level: fallbackCategory,
         confidence: 0.84,
         pss_score: fallbackPss,
+        scaled_pss_score: fallbackPss,
         assessment_id: "local-" + Date.now(),
-        study_hours: 5.0,
-        sleep_hours: 7.0,
+        study_hours: studyVal,
+        sleep_hours: sleepVal,
         recommendations: [
           {
             title: "Autonomic Regulation",
@@ -351,12 +373,12 @@ export default function AssessmentScreen({ navigation }) {
           },
           {
             title: "Sleep Consistency",
-            desc: "Maintain a steady sleep schedule of 7-8 hours to bolster emotional resilience and physical recovery.",
+            desc: `With ${sleepVal}h sleep recorded, maintain a steady rest schedule to bolster emotional resilience.`,
             icon: "Moon"
           },
           {
             title: "Cognitive Pacing",
-            desc: "Adopt structured study blocks and active resets to preserve sustained focus and working memory.",
+            desc: `Divide your ${studyVal}h daily study cadence with mindful restorative breaks to preserve focus.`,
             icon: "Clock"
           }
         ]
@@ -370,95 +392,114 @@ export default function AssessmentScreen({ navigation }) {
 
   // Completion Screen View
   if (assessmentResult) {
-    const isHigh = assessmentResult.predicted_stress === "High";
-    const isModerate = assessmentResult.predicted_stress === "Moderate";
-    const badgeColor = isHigh ? "#EF4444" : isModerate ? "#F59E0B" : "#0D9488";
-    const badgeBg = isHigh ? "#FEF2F2" : isModerate ? "#FFFBEB" : "#E6F4F1";
+    const stressLevel = assessmentResult.stress_level || assessmentResult.predicted_stress || "Moderate";
+    const isHigh = stressLevel === "High";
+    const isModerate = stressLevel === "Moderate";
+    // Soft color-coded pills:
+    // Low: soft emerald (#DCFCE7, border #86EFAC, text #15803D)
+    // Moderate: warm amber (#FEF3C7, border #FCD34D, text #B45309)
+    // High: soft coral-red (#FEE2E2, border #FCA5A5, text #B91C1C)
+    const badgeColor = isHigh ? "#B91C1C" : isModerate ? "#B45309" : "#15803D";
+    const badgeBg = isHigh ? "#FEE2E2" : isModerate ? "#FEF3C7" : "#DCFCE7";
+    const badgeBorder = isHigh ? "#FCA5A5" : isModerate ? "#FCD34D" : "#86EFAC";
+    const rawScore = assessmentResult.scaled_pss_score ?? assessmentResult.pss_score ?? 5.0;
+    const pssFormatted = Number(rawScore).toFixed(1);
 
     return (
-      <SafeAreaView style={styles.container}>
-        {/* Top Header Bar with Standardized Settings Layout */}
-        <View style={styles.headerBar}>
-          <TouchableOpacity 
-            onPress={() => navigation.navigate("Main", { screen: "Home" })} 
-            style={styles.headerBackBtn}
-          >
-            <ArrowLeft size={20} color="#0D9488" />
-            <Text style={styles.headerBackText}>Dashboard</Text>
-          </TouchableOpacity>
+      <View style={styles.container}>
+        {/* Ambient Translucent Mint-Teal and Soft Sky-Blue Circles (Identical to HomeScreen.js) */}
+        <View pointerEvents="none" style={styles.ambientOrbTop} />
+        <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+        <View pointerEvents="none" style={styles.ambientOrbBottom} />
 
-          <View style={styles.headerRightGroup}>
+        <SafeAreaView style={styles.safeArea}>
+          {/* Top Header Bar with Minimal Layout */}
+          <View style={styles.headerBar}>
+            <TouchableOpacity 
+              onPress={() => navigation.navigate("Main", { screen: "Home" })} 
+              style={styles.circularBackBtn}
+              accessibilityLabel="Dashboard"
+              activeOpacity={0.7}
+            >
+              <ArrowLeft size={20} color="#0D9488" strokeWidth={2.5} />
+            </TouchableOpacity>
+
             <View style={styles.headerRightBadge}>
-              <ShieldCheck size={15} color="#0F766E" style={{ marginRight: 4 }} />
+              <ShieldCheck size={15} color="#0F766E" style={{ marginRight: 5 }} />
               <Text style={styles.headerRightBadgeText}>Assessment Results</Text>
             </View>
-            <TouchableOpacity 
-              style={styles.headerGearBtn}
-              onPress={() => navigation.navigate('Main', { screen: 'Profile' })}
-              activeOpacity={0.7}
-              accessibilityLabel="Settings"
-            >
-              <Settings size={18} color="#0D9488" />
-            </TouchableOpacity>
           </View>
-        </View>
 
-        <ScrollView contentContainerStyle={styles.resultScrollContent} showsVerticalScrollIndicator={false}>
-          <View style={styles.resultHeaderCard}>
-            <View style={styles.successIconBadge}>
-              <CheckCircle2 size={56} color="#0D9488" />
-            </View>
-            <Text style={styles.resultMainTitle}>Clinical Assessment Complete</Text>
-            <Text style={styles.resultSubtitle}>
-              Biometric metrics and psychometric resilience indicators successfully indexed into your health graph.
-            </Text>
+          <ScrollView contentContainerStyle={styles.resultScrollContent} showsVerticalScrollIndicator={false}>
+          {/* 1. Top Calming Hero Image Banner */}
+          <View style={styles.heroCard}>
+            <Image 
+              source={require('../../assets/images/banner-1.png')}
+              style={StyleSheet.absoluteFillObject}
+              resizeMode="cover"
+            />
+            <LinearGradient
+              colors={["rgba(15, 23, 42, 0.05)", "rgba(15, 23, 42, 0.6)"]}
+              style={styles.heroGradientOverlay}
+            >
+              <View style={styles.heroPillTag}>
+                <Text style={styles.heroPillText}>CLINICAL WELLNESS SUMMARY</Text>
+              </View>
+              <Text style={styles.heroTitle}>Assessment Complete</Text>
+            </LinearGradient>
+          </View>
 
-            <View style={[styles.stressBadge, { backgroundColor: badgeBg, borderColor: badgeColor }]}>
-              <Activity size={18} color={badgeColor} style={{ marginRight: 6 }} />
-              <Text style={[styles.stressBadgeText, { color: badgeColor }]}>
-                Predicted Stress: {assessmentResult.predicted_stress}
-              </Text>
-            </View>
-
-            <View style={styles.scoreRow}>
-              <View style={styles.scorePill}>
-                <Text style={styles.scorePillLabel}>Scaled PSS Index</Text>
-                <Text style={styles.scorePillValue}>
-                  {alignPssToStressCategory(assessmentResult.pss_score ?? 5.0, assessmentResult.predicted_stress)}/10
+          {/* 2. Frosted White Glass Metrics Card (Clean, Icon-Free Editorial) */}
+          <View style={styles.metricsCard}>
+            <View style={styles.metricsTopRow}>
+              <Text style={styles.metricsLabel}>Predicted Stress Level</Text>
+              <View style={[styles.statusPill, { backgroundColor: badgeBg, borderColor: badgeBorder }]}>
+                <Text style={[styles.statusPillText, { color: badgeColor }]}>
+                  {stressLevel}
                 </Text>
               </View>
-              <View style={styles.scorePill}>
-                <Text style={styles.scorePillLabel}>Evaluation Status</Text>
-                <Text style={styles.scorePillValue}>Complete</Text>
+            </View>
+
+            <View style={styles.metricsHDivider} />
+
+            <View style={styles.metricsDualRow}>
+              <View style={styles.metricColumn}>
+                <Text style={styles.metricColLabel}>SCALED PSS INDEX</Text>
+                <View style={styles.metricValueRow}>
+                  <Text style={styles.metricColValueLarge}>{pssFormatted}</Text>
+                  <Text style={styles.metricColValueUnit}>/10</Text>
+                </View>
+              </View>
+
+              <View style={styles.metricsVDivider} />
+
+              <View style={styles.metricColumn}>
+                <Text style={styles.metricColLabel}>HEALTH GRAPH</Text>
+                <View style={styles.syncedRow}>
+                  <View style={styles.syncedDot} />
+                  <Text style={styles.syncedText}>Synced</Text>
+                </View>
               </View>
             </View>
           </View>
 
-          {/* Actionable Coping Protocols: Minimal outline icons (Clock, HeartPulse, Moon) */}
+          {/* 3. Editorial Personalized Coping Protocols (Zero Boxy Icons) */}
           <View style={styles.recsSection}>
-            <View style={styles.recsHeaderRow}>
-              <CheckCircle2 size={20} color="#0D9488" />
-              <Text style={styles.recsSectionTitle}>Personalized Clinical Coping Protocols</Text>
+            <View style={styles.recsHeaderContainer}>
+              <Text style={styles.recsSectionTitle}>Personalized Coping Protocols</Text>
+              <Text style={styles.recsSectionSubtitle}>Tailored to your sleep, study load & reflections</Text>
             </View>
 
-            {assessmentResult.recommendations.map((rec, idx) => {
-              const titleLower = (rec.title || '').toLowerCase();
-              const isSleep = rec.icon === "Moon" || titleLower.includes("sleep") || titleLower.includes("rest");
-              const isPacing = rec.icon === "Clock" || titleLower.includes("cognitive") || titleLower.includes("pacing") || titleLower.includes("chunking");
-
+            {(assessmentResult.recommendations || []).map((rec, idx) => {
+              const stepNum = String(idx + 1).padStart(2, '0');
               return (
-                <View key={idx} style={styles.recCard}>
-                  <View style={styles.recIconWrap}>
-                    {isSleep ? (
-                      <Moon size={20} color="#0D9488" />
-                    ) : isPacing ? (
-                      <Clock size={20} color="#0D9488" />
-                    ) : (
-                      <HeartPulse size={20} color="#0D9488" />
-                    )}
-                  </View>
+                <View key={idx} style={styles.editorialRecCard}>
+                  <View style={styles.recAccentBar} />
                   <View style={styles.recBody}>
-                    <Text style={styles.recTitle}>{rec.title}</Text>
+                    <View style={styles.recHeaderRow}>
+                      <Text style={styles.recStepNum}>{stepNum}</Text>
+                      <Text style={styles.recTitle}>{rec.title}</Text>
+                    </View>
                     <Text style={styles.recDesc}>{rec.desc}</Text>
                   </View>
                 </View>
@@ -466,7 +507,7 @@ export default function AssessmentScreen({ navigation }) {
             })}
           </View>
 
-          {/* Single Primary Call-To-Action Button: Back to Dashboard */}
+          {/* 4. Bottom Action Button: Back to Dashboard */}
           <View style={styles.buttonStack}>
             <TouchableOpacity 
               style={styles.primaryTealBtn} 
@@ -474,38 +515,37 @@ export default function AssessmentScreen({ navigation }) {
               activeOpacity={0.85}
             >
               <Text style={styles.primaryTealBtnText}>Back to Dashboard</Text>
-              <ChevronRight size={18} color="#FFF" />
+              <ChevronRight size={18} color="#FFF" strokeWidth={2.5} />
             </TouchableOpacity>
           </View>
         </ScrollView>
       </SafeAreaView>
+    </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Top Header Bar with Standardized Settings Layout */}
-      <View style={styles.headerBar}>
-        <TouchableOpacity onPress={handlePrevious} style={styles.headerBackBtn}>
-          <ArrowLeft size={20} color="#0D9488" />
-          <Text style={styles.headerBackText}>
-            {currentStepIndex > 0 ? "Previous" : "Back"}
-          </Text>
+    <View style={styles.container}>
+      {/* Ambient Translucent Mint-Teal and Soft Sky-Blue Circles (Identical to HomeScreen.js) */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
+
+      <SafeAreaView style={styles.safeArea}>
+        {/* Top Header Bar with Minimal Layout */}
+        <View style={styles.headerBar}>
+          <TouchableOpacity 
+            onPress={handlePrevious} 
+            style={styles.circularBackBtn}
+            accessibilityLabel="Back"
+            activeOpacity={0.7}
+          >
+          <ArrowLeft size={20} color="#0D9488" strokeWidth={2.5} />
         </TouchableOpacity>
 
-        <View style={styles.headerRightGroup}>
-          <View style={styles.headerRightBadge}>
-            <ShieldCheck size={15} color="#0F766E" style={{ marginRight: 4 }} />
-            <Text style={styles.headerRightBadgeText}>Adaptive PSS</Text>
-          </View>
-          <TouchableOpacity 
-            style={styles.headerGearBtn}
-            onPress={() => navigation.navigate('Main', { screen: 'Profile' })}
-            activeOpacity={0.7}
-            accessibilityLabel="Settings"
-          >
-            <Settings size={18} color="#0D9488" />
-          </TouchableOpacity>
+        <View style={styles.headerRightBadge}>
+          <ShieldCheck size={15} color="#0F766E" style={{ marginRight: 5 }} />
+          <Text style={styles.headerRightBadgeText}>Adaptive PSS</Text>
         </View>
       </View>
 
@@ -522,7 +562,7 @@ export default function AssessmentScreen({ navigation }) {
                 </View>
               )}
             </View>
-            <Text style={styles.longitudinalBannerText}>{checkinMessage}</Text>
+            <Text style={styles.longitudinalBannerText} numberOfLines={3}>{checkinMessage}</Text>
           </View>
         )}
 
@@ -617,11 +657,16 @@ export default function AssessmentScreen({ navigation }) {
             (!selectedOption && !currentText.trim()) && styles.nextButtonDisabled
           ]}
           onPress={handleNext}
-          disabled={(!selectedOption && !currentText.trim()) || isSubmitting || isEvaluatingText}
+          disabled={(!selectedOption && !currentText.trim()) || isSubmitting || isEvaluatingText || isAdaptingNext}
           activeOpacity={0.8}
         >
-          {isSubmitting || isEvaluatingText ? (
-            <ActivityIndicator size="small" color="#FFF" />
+          {isSubmitting || isEvaluatingText || isAdaptingNext ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <ActivityIndicator size="small" color="#FFF" />
+              <Text style={styles.nextButtonText}>
+                {isAdaptingNext ? "Adapting next question..." : isEvaluatingText ? "Evaluating response..." : "Processing..."}
+              </Text>
+            </View>
           ) : (
             <>
               <Text style={styles.nextButtonText}>
@@ -633,61 +678,84 @@ export default function AssessmentScreen({ navigation }) {
         </TouchableOpacity>
       </View>
     </SafeAreaView>
+  </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { 
     flex: 1, 
-    backgroundColor: '#F8FAFC' 
+    backgroundColor: '#EDF5F4' 
   },
+  safeArea: {
+    flex: 1,
+  },
+
+  // Ambient Translucent Mint-Teal & Soft Sky-Blue Circles (Matching HomeScreen.js)
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(45, 212, 191, 0.24)',
+  },
+  ambientOrbMiddle: {
+    position: 'absolute',
+    top: 360,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.20)',
+  },
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: 100,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(56, 189, 248, 0.18)',
+  },
+
   headerBar: { 
     flexDirection: 'row', 
     justifyContent: 'space-between', 
     alignItems: 'center', 
     paddingHorizontal: 20, 
-    paddingVertical: 14,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9'
+    paddingVertical: 12,
   },
-  headerBackBtn: { 
-    flexDirection: 'row', 
-    alignItems: 'center' 
-  },
-  headerBackText: { 
-    color: '#0D9488', 
-    fontSize: 15, 
-    fontWeight: '600', 
-    marginLeft: 6 
-  },
-  headerRightGroup: {
-    flexDirection: 'row',
+  circularBackBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
   },
   headerRightBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#E6F4F1',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
+    backgroundColor: '#CCFBF1',
+    borderWidth: 1,
+    borderColor: '#99F6E4',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
   },
   headerRightBadgeText: {
     color: '#0F766E',
     fontSize: 12,
     fontWeight: '700'
-  },
-  headerGearBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   scrollBody: { 
     paddingHorizontal: 20, 
@@ -695,43 +763,48 @@ const styles = StyleSheet.create({
     paddingBottom: 110 
   },
   longitudinalBanner: {
-    backgroundColor: '#F0FDFA',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
     padding: 14,
-    marginBottom: 16
+    marginBottom: 12,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
   },
   longitudinalBannerHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 6
+    marginBottom: 4,
   },
   longitudinalBannerTitle: {
-    fontSize: 13,
+    fontSize: 12.5,
     fontWeight: '700',
     color: '#0F766E',
     marginLeft: 6,
-    flex: 1
+    flex: 1,
   },
   historyPill: {
-    backgroundColor: '#E6F4F1',
+    backgroundColor: '#CCFBF1',
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: 8
+    borderRadius: 8,
   },
   historyPillText: {
     fontSize: 11,
     color: '#0D9488',
-    fontWeight: '700'
+    fontWeight: '700',
   },
   longitudinalBannerText: {
-    fontSize: 13,
-    color: '#334155',
-    lineHeight: 19
+    fontSize: 12.5,
+    color: '#475569',
+    lineHeight: 18,
   },
   progressContainer: { 
-    marginBottom: 18 
+    marginBottom: 12 
   },
   progressLabelRow: { 
     flexDirection: 'row', 
@@ -763,11 +836,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row', 
     alignItems: 'center', 
     alignSelf: 'flex-start', 
-    backgroundColor: '#E6F4F1', 
+    backgroundColor: '#CCFBF1', 
     paddingHorizontal: 12, 
-    paddingVertical: 6, 
-    borderRadius: 20, 
-    marginBottom: 12 
+    paddingVertical: 5, 
+    borderRadius: 18, 
+    marginBottom: 10 
   },
   categoryChipText: { 
     fontSize: 12, 
@@ -775,27 +848,36 @@ const styles = StyleSheet.create({
     color: '#0F766E' 
   },
   questionCard: { 
-    backgroundColor: '#FFFFFF', 
-    borderRadius: 18, 
-    padding: 18, 
-    borderWidth: 1, 
-    borderColor: '#E2E8F0', 
-    marginBottom: 16,
-    elevation: 1 
+    backgroundColor: 'rgba(255, 255, 255, 0.88)', 
+    borderRadius: 24, 
+    padding: 20, 
+    borderWidth: 1.5, 
+    borderColor: '#FFFFFF', 
+    marginBottom: 14,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2 
   },
   questionText: { 
-    fontSize: 17, 
+    fontSize: 16.5, 
     fontWeight: '700', 
-    color: '#1E293B', 
-    lineHeight: 25 
+    color: '#0F172A', 
+    lineHeight: 24 
   },
   nlpInputCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginBottom: 18
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 24,
+    padding: 16,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    marginBottom: 14,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
   },
   nlpHeaderRow: {
     flexDirection: 'row',
@@ -812,9 +894,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
     borderRadius: 12,
     padding: 12,
-    fontSize: 14,
+    fontSize: 13.5,
     color: '#1E293B',
-    minHeight: 65,
+    minHeight: 60,
     textAlignVertical: 'top',
     borderWidth: 1,
     borderColor: '#E2E8F0'
@@ -831,69 +913,90 @@ const styles = StyleSheet.create({
     gap: 10 
   },
   optionChip: { 
-    backgroundColor: '#FFFFFF', 
+    backgroundColor: 'rgba(255, 255, 255, 0.88)', 
     flexDirection: 'row', 
     alignItems: 'center', 
-    padding: 15, 
-    borderRadius: 14, 
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 24, 
     borderWidth: 1.5, 
-    borderColor: '#E2E8F0' 
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 1,
   },
   optionChipSelected: { 
+    backgroundColor: 'rgba(204, 251, 241, 0.92)', 
     borderColor: '#0D9488', 
-    backgroundColor: '#F0FDFA' 
+    borderWidth: 1.8,
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+    elevation: 2,
   },
   radioCircle: { 
-    width: 20, 
-    height: 20, 
-    borderRadius: 10, 
+    width: 22, 
+    height: 22, 
+    borderRadius: 11, 
     borderWidth: 2, 
     borderColor: '#CBD5E1', 
     justifyContent: 'center', 
     alignItems: 'center', 
-    marginRight: 12 
+    marginRight: 12,
+    backgroundColor: '#FFFFFF',
   },
   radioCircleSelected: { 
-    borderColor: '#0D9488' 
+    borderColor: '#0D9488',
+    backgroundColor: '#0D9488',
   },
   radioDot: { 
-    width: 10, 
-    height: 10, 
-    borderRadius: 5, 
-    backgroundColor: '#0D9488' 
+    width: 8, 
+    height: 8, 
+    borderRadius: 4, 
+    backgroundColor: '#FFFFFF', 
   },
   optionText: { 
     fontSize: 15, 
     color: '#334155', 
-    fontWeight: '500' 
+    fontWeight: '600' 
   },
   optionTextSelected: { 
     color: '#0F766E', 
-    fontWeight: '700' 
+    fontWeight: '800' 
   },
   bottomBar: { 
     position: 'absolute', 
     bottom: 0, 
     left: 0, 
     right: 0, 
-    backgroundColor: '#FFFFFF', 
+    backgroundColor: 'rgba(255, 255, 255, 0.92)', 
     paddingHorizontal: 20, 
     paddingVertical: 14, 
-    borderTopWidth: 1, 
-    borderTopColor: '#F1F5F9',
+    borderTopWidth: 1.2, 
+    borderTopColor: 'rgba(255, 255, 255, 0.7)',
     elevation: 8 
   },
   nextButton: { 
     backgroundColor: '#0D9488', 
     paddingVertical: 15, 
-    borderRadius: 16, 
+    borderRadius: 20, 
     flexDirection: 'row', 
     justifyContent: 'center', 
     alignItems: 'center', 
-    gap: 8 
+    gap: 8,
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 3,
   },
   nextButtonDisabled: { 
-    backgroundColor: '#CBD5E1' 
+    backgroundColor: '#CBD5E1',
+    shadowOpacity: 0,
+    elevation: 0,
   },
   nextButtonText: { 
     color: '#FFFFFF', 
@@ -901,143 +1004,225 @@ const styles = StyleSheet.create({
     fontWeight: '700' 
   },
   resultScrollContent: { 
-    padding: 24, 
+    padding: 20, 
+    paddingTop: 16,
     paddingBottom: 40 
   },
-  resultHeaderCard: { 
-    backgroundColor: '#FFFFFF', 
-    borderRadius: 24, 
-    padding: 24, 
-    alignItems: 'center', 
-    borderWidth: 1, 
-    borderColor: '#E2E8F0',
-    marginBottom: 20,
-    elevation: 2 
+  heroCard: {
+    height: 185,
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 3,
   },
-  successIconBadge: { 
-    width: 80, 
-    height: 80, 
-    borderRadius: 40, 
-    backgroundColor: '#E6F4F1', 
-    justifyContent: 'center', 
-    alignItems: 'center', 
-    marginBottom: 16 
+  heroGradientOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    padding: 18,
   },
-  resultMainTitle: { 
-    fontSize: 22, 
-    fontWeight: '800', 
-    color: '#1E293B', 
-    textAlign: 'center', 
-    marginBottom: 8 
-  },
-  resultSubtitle: { 
-    fontSize: 14, 
-    color: '#64748B', 
-    textAlign: 'center', 
-    lineHeight: 20, 
-    marginBottom: 16 
-  },
-  stressBadge: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    paddingHorizontal: 16, 
-    paddingVertical: 8, 
-    borderRadius: 20, 
-    borderWidth: 1, 
-    marginBottom: 12 
-  },
-  stressBadgeText: { 
-    fontSize: 15, 
-    fontWeight: '700' 
-  },
-  scoreRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginTop: 4
-  },
-  scorePill: {
-    backgroundColor: '#F8FAFC',
+  heroPillTag: {
+    backgroundColor: 'rgba(255, 255, 255, 0.28)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginBottom: 6,
     borderWidth: 1,
-    borderColor: '#E2E8F0'
+    borderColor: 'rgba(255, 255, 255, 0.4)',
   },
-  scorePillLabel: {
-    fontSize: 11,
-    color: '#64748B',
-    fontWeight: '600'
-  },
-  scorePillValue: {
-    fontSize: 14,
+  heroPillText: {
+    color: '#FFFFFF',
+    fontSize: 10,
     fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  heroTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: -0.3,
+  },
+  metricsCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 20,
+    marginTop: 14,
+    marginBottom: 20,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  metricsTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  metricsLabel: {
+    fontSize: 13,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  statusPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  statusPillText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  metricsHDivider: {
+    height: 1,
+    backgroundColor: 'rgba(203, 213, 225, 0.45)',
+    marginVertical: 16,
+  },
+  metricsDualRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  metricColumn: {
+    flex: 1,
+  },
+  metricColLabel: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#94A3B8',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  metricValueRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  metricColValueLarge: {
+    fontSize: 26,
+    fontWeight: '800',
     color: '#0D9488',
-    marginTop: 2
+  },
+  metricColValueUnit: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#94A3B8',
+    marginLeft: 2,
+  },
+  metricsVDivider: {
+    width: 1,
+    height: 38,
+    backgroundColor: 'rgba(203, 213, 225, 0.45)',
+    marginHorizontal: 16,
+  },
+  syncedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  syncedDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#0D9488',
+    marginRight: 6,
+  },
+  syncedText: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#0F172A',
   },
   recsSection: { 
-    marginBottom: 25 
+    marginBottom: 10 
   },
-  recsHeaderRow: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    marginBottom: 14, 
-    gap: 8 
+  recsHeaderContainer: {
+    marginBottom: 14,
   },
   recsSectionTitle: { 
-    fontSize: 16, 
+    fontSize: 17, 
     fontWeight: '700', 
-    color: '#1E293B' 
+    color: '#0F172A',
+    letterSpacing: -0.2,
   },
-  recCard: { 
-    backgroundColor: '#FFFFFF', 
-    padding: 16, 
-    borderRadius: 18, 
+  recsSectionSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  editorialRecCard: { 
+    backgroundColor: 'rgba(255, 255, 255, 0.88)', 
+    borderRadius: 24, 
+    borderWidth: 1.5, 
+    borderColor: '#FFFFFF',
     flexDirection: 'row', 
+    overflow: 'hidden',
     marginBottom: 12, 
-    borderWidth: 1, 
-    borderColor: '#E2E8F0',
-    elevation: 1 
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2 
   },
-  recIconWrap: { 
-    width: 44, 
-    height: 44, 
-    borderRadius: 14, 
-    backgroundColor: '#E6F4F1', 
-    justifyContent: 'center', 
-    alignItems: 'center', 
-    marginRight: 14 
+  recAccentBar: {
+    width: 3.5,
+    backgroundColor: '#0D9488',
   },
   recBody: { 
-    flex: 1 
+    flex: 1,
+    padding: 18,
+  },
+  recHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  recStepNum: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0D9488',
+    letterSpacing: 0.5,
+    marginRight: 8,
   },
   recTitle: { 
     fontSize: 15, 
     fontWeight: '700', 
-    color: '#1E293B', 
-    marginBottom: 4 
+    color: '#0F172A', 
+    flex: 1,
   },
   recDesc: { 
-    fontSize: 13, 
-    color: '#64748B', 
-    lineHeight: 18 
+    fontSize: 13.5, 
+    color: '#475569', 
+    lineHeight: 20,
+    marginTop: 2,
   },
   buttonStack: { 
-    gap: 12 
+    marginTop: 10,
+    paddingBottom: 34 
   },
   primaryTealBtn: { 
     backgroundColor: '#0D9488', 
-    paddingVertical: 16, 
-    borderRadius: 16, 
+    height: 54, 
+    borderRadius: 20, 
     flexDirection: 'row', 
     justifyContent: 'center', 
     alignItems: 'center', 
-    gap: 8 
+    gap: 8,
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    elevation: 4
   },
   primaryTealBtnText: { 
     color: '#FFFFFF', 
     fontSize: 16, 
-    fontWeight: '700' 
+    fontWeight: '800' 
   },
   secondaryBtn: { 
     backgroundColor: '#FFFFFF', 

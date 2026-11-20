@@ -1,18 +1,20 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, StatusBar, Image } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, StatusBar, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { verifyOTP, sendOTP } from '../api/authService';
+import GlassAlert, { useGlassAlert } from '../components/GlassAlert';
 
 export default function OTPScreen({ navigation, route }) {
   const { email } = route.params || {};
   const [otpCode, setOtpCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
+  const { alertConfig, showAlert, hideAlert } = useGlassAlert();
 
   const handleVerify = async () => {
     if (otpCode.length < 6) {
-      Alert.alert('Incomplete Code', 'Please enter the 6-digit verification code.');
+      showAlert('Incomplete Code', 'Please enter the 6-digit verification code.', 'error');
       return;
     }
 
@@ -20,16 +22,16 @@ export default function OTPScreen({ navigation, route }) {
     try {
       const response = await verifyOTP(email, otpCode);
       if (response.status === 200) {
-        Alert.alert('Verification Successful', 'Your account has been verified. Please sign in.', [
+        showAlert('Verification Successful', 'Your account has been verified. Please sign in.', [
           {
             text: 'Sign In',
             onPress: () => navigation.navigate('Login'),
           },
-        ]);
+        ], 'success');
       }
     } catch (error) {
       const msg = error.response?.data?.detail || 'Invalid or expired verification code.';
-      Alert.alert('Verification Failed', msg);
+      showAlert('Verification Failed', msg, 'error');
     } finally {
       setLoading(false);
     }
@@ -39,9 +41,9 @@ export default function OTPScreen({ navigation, route }) {
     setResending(true);
     try {
       await sendOTP(email);
-      Alert.alert('Code Dispatched', 'A fresh verification code has been sent to your email.');
+      showAlert('Code Dispatched', 'A fresh verification code has been sent to your email.', 'success');
     } catch (error) {
-      Alert.alert('Error', 'Could not resend verification code. Please try again later.');
+      showAlert('Error', 'Could not resend verification code. Please try again later.', 'error');
     } finally {
       setResending(false);
     }
@@ -114,6 +116,16 @@ export default function OTPScreen({ navigation, route }) {
           </View>
         </View>
       </SafeAreaView>
+
+      {/* Glassmorphism Alert Modal */}
+      <GlassAlert
+        visible={alertConfig.visible}
+        type={alertConfig.type}
+        title={alertConfig.title}
+        message={alertConfig.message}
+        buttons={alertConfig.buttons}
+        onClose={hideAlert}
+      />
     </View>
   );
 }

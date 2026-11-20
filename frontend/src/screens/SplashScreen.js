@@ -33,12 +33,17 @@ const SplashScreen = ({ navigation }) => {
     <View style={styles.container}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
+      {/* Rich Deep Teal-Navy Gradient Background */}
       <LinearGradient
-        colors={['#0B1120', '#0F172A', '#1E293B']}
-        start={{ x: 0.5, y: 0 }}
-        end={{ x: 0.5, y: 1 }}
+        colors={['#091522', '#0F292E', '#132A3A']}
+        start={{ x: 0.2, y: 0 }}
+        end={{ x: 0.8, y: 1 }}
         style={StyleSheet.absoluteFillObject}
       />
+
+      {/* Soft Glowing Mint-Teal Ambient Circles */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
 
       <Animated.View
         style={[
@@ -67,47 +72,66 @@ const SplashScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: '#091522',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -60,
+    right: -60,
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: 'rgba(45, 212, 191, 0.16)',
+  },
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: -80,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.12)',
   },
   content: {
     alignItems: 'center',
     paddingHorizontal: 32,
+    zIndex: 10,
   },
   logoHalo: {
     width: 160,
     height: 160,
     borderRadius: 80,
-    backgroundColor: 'rgba(20, 184, 166, 0.08)',
+    backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(20, 184, 166, 0.25)',
-    shadowColor: '#14B8A6',
+    borderWidth: 2,
+    borderColor: '#2DD4BF',
+    shadowColor: '#2DD4BF',
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
+    shadowOpacity: 0.35,
     shadowRadius: 20,
     elevation: 8,
   },
   logo: {
-    width: 140,
-    height: 140,
+    width: 120,
+    height: 120,
   },
   title: {
     fontSize: 36,
-    fontWeight: '700',
-    color: '#F8FAFC',
+    fontWeight: '800',
+    color: '#FFFFFF',
     letterSpacing: 1.5,
   },
   subtitle: {
     fontSize: 16,
-    color: '#94A3B8',
+    color: '#99F6E4',
     marginTop: 10,
     textAlign: 'center',
     letterSpacing: 0.5,
-    fontWeight: '400',
+    fontWeight: '500',
   },
 });
 

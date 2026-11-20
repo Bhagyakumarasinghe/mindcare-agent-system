@@ -333,11 +333,6 @@ def get_user_academic_subjects(user_id: str = Query(..., description="User ID in
             """
             results = session.run(subjects_query, user_id=clean_user_id).data()
 
-            # If user has no subjects yet, seed defaults and re-query
-            if not results:
-                seed_default_subjects(session, clean_user_id)
-                results = session.run(subjects_query, user_id=clean_user_id).data()
-
             output = []
             for item in results:
                 topics_list = item.get("topics", [])

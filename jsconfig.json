@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "jsx": "react-native",
+    "allowJs": true,
+    "checkJs": false,
+    "skipLibCheck": true
+  },
+  "include": [
+    "frontend/src/**/*",
+    "frontend/App.js",
+    "frontend/index.js"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/node_modules/**",
+    "frontend/node_modules",
+    "frontend/.expo",
+    "backend/venv"
+  ]
+}

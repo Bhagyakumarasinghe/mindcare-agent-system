@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
+  Image,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
@@ -24,7 +25,7 @@ import {
   Plus,
   X,
   Award,
-  Settings,
+  Search,
   Play,
   GraduationCap,
   ChevronRight,
@@ -56,6 +57,11 @@ export default function AplusTrackScreen({ navigation }) {
   const [subjects, setSubjects] = useState(cachedSubjectsData || []);
   const [recommendation, setRecommendation] = useState(cachedRecData || null);
   const [userId, setUserId] = useState('demo_user');
+  const userIdRef = useRef('demo_user');
+  const isFetchingRef = useRef(false);
+
+  // Search Query State for real-time subject & topic filtering
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Interactive "Add Subject & Module" Modal State
   const [isAddModalVisible, setIsAddModalVisible] = useState(false);
@@ -75,44 +81,143 @@ export default function AplusTrackScreen({ navigation }) {
   const [decomposingLoadingId, setDecomposingLoadingId] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
 
-  const loadScreenData = useCallback(async () => {
+  // Helper to persist current A+ track state into AsyncStorage
+  const persistAplusCache = (uid, currentSubjects, currentRec) => {
+    const targetUid = uid || userIdRef.current;
+    if (!targetUid || targetUid === 'demo_user') return;
     try {
-      if (!cachedSubjectsData) {
-        setLoading(true);
-      }
-      let targetUser = userId;
+      AsyncStorage.setItem(
+        `@mindcare_aplus_cache_${targetUid}`,
+        JSON.stringify({
+          subjects: currentSubjects,
+          recommendation: currentRec,
+          timestamp: Date.now(),
+        })
+      ).catch(() => {});
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  // Immediate storage hydration on mount (0ms delay, no spinner if cached)
+  useEffect(() => {
+    let isMounted = true;
+    const hydrateFromStorage = async () => {
       try {
-        const userRes = await Promise.race([
-          getUserProfile(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Profile timeout')), 2500))
-        ]);
-        if (userRes?.data?.id) {
-          targetUser = userRes.data.id;
-          setUserId(userRes.data.id);
+        let uid = 'demo_user';
+        const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+        if (cachedProf) {
+          const parsedProf = JSON.parse(cachedProf);
+          if (parsedProf?.id || parsedProf?.user_id) {
+            uid = parsedProf.id || parsedProf.user_id;
+            userIdRef.current = uid;
+            if (isMounted) setUserId(uid);
+          }
         }
-      } catch (err) {
-        console.log('Using default user identity for academic track:', err?.message || err);
+
+        const aplusCacheKey = `@mindcare_aplus_cache_${uid}`;
+        const cachedAplus = await AsyncStorage.getItem(aplusCacheKey);
+        if (cachedAplus) {
+          const parsedAplus = JSON.parse(cachedAplus);
+          if (parsedAplus?.subjects && Array.isArray(parsedAplus.subjects) && isMounted) {
+            cachedSubjectsData = parsedAplus.subjects;
+            setSubjects(parsedAplus.subjects);
+            if (parsedAplus?.recommendation) {
+              cachedRecData = parsedAplus.recommendation;
+              setRecommendation(parsedAplus.recommendation);
+            }
+            setLoading(false);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    hydrateFromStorage();
+    return () => { isMounted = false; };
+  }, []);
+
+  const loadScreenData = useCallback(async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+
+    try {
+      // 1. Resolve user ID immediately from cached profile or ref
+      let targetUser = userIdRef.current;
+      if (!targetUser || targetUser === 'demo_user') {
+        try {
+          const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+          if (cachedProf) {
+            const parsedProf = JSON.parse(cachedProf);
+            if (parsedProf?.id || parsedProf?.user_id) {
+              targetUser = parsedProf.id || parsedProf.user_id;
+              userIdRef.current = targetUser;
+              setUserId(targetUser);
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
       }
 
+      // Only show full loading spinner if we have zero cached subjects
+      if (!cachedSubjectsData && subjects.length === 0) {
+        setLoading(true);
+      }
+
+      // If still demo_user, attempt a quick non-blocking profile resolution
+      if (!targetUser || targetUser === 'demo_user') {
+        try {
+          const userRes = await Promise.race([
+            getUserProfile(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Profile timeout')), 1500))
+          ]);
+          if (userRes?.data?.id) {
+            targetUser = userRes.data.id;
+            userIdRef.current = targetUser;
+            setUserId(targetUser);
+          }
+        } catch (err) {
+          console.log('Using default user identity for academic track:', err?.message || err);
+        }
+      }
+
+      // 2. Single concurrent fetch for subjects and recommendations
       const [subjectsRes, recRes] = await Promise.all([
         getAcademicSubjects(targetUser).catch(() => null),
         getAcademicRecommendation(targetUser).catch(() => null),
       ]);
 
+      let freshSubjects = null;
+      let freshRec = null;
+
       if (subjectsRes?.data?.subjects) {
-        cachedSubjectsData = subjectsRes.data.subjects;
-        setSubjects(subjectsRes.data.subjects);
+        freshSubjects = subjectsRes.data.subjects;
+        cachedSubjectsData = freshSubjects;
+        setSubjects(freshSubjects);
       }
       if (recRes?.data) {
-        cachedRecData = recRes.data;
-        setRecommendation(recRes.data);
+        freshRec = recRes.data;
+        cachedRecData = freshRec;
+        setRecommendation(freshRec);
+      }
+
+      // 3. Persist latest data to AsyncStorage cache for instant subsequent visits
+      if (freshSubjects || freshRec) {
+        persistAplusCache(
+          targetUser,
+          freshSubjects || subjects,
+          freshRec || recommendation
+        );
       }
     } catch (error) {
       console.error('Error loading academic data:', error);
     } finally {
       setLoading(false);
+      isFetchingRef.current = false;
     }
-  }, [userId]);
+  }, []); // IMPORTANT: Empty dependency array ensures loadScreenData never cascades on userId state changes
 
   useFocusEffect(
     useCallback(() => {
@@ -139,7 +244,7 @@ export default function AplusTrackScreen({ navigation }) {
 
     try {
       setDecomposingLoadingId(subjectId);
-      const res = await decomposeAcademicTask(userId, subjectId, rawInput);
+      const res = await decomposeAcademicTask(userIdRef.current || userId, subjectId, rawInput);
       const data = res?.data;
 
       const rawNewTopics = data?.created_topics || (data?.tasks || []).map((t, i) => ({
@@ -166,8 +271,8 @@ export default function AplusTrackScreen({ navigation }) {
       }
 
       if (newTopics && newTopics.length > 0) {
-        setSubjects((prevSubjects) =>
-          prevSubjects.map((sub) => {
+        setSubjects((prevSubjects) => {
+          const updated = prevSubjects.map((sub) => {
             if (sub.id === subjectId || sub.name === subjectId) {
               const existingNames = new Set(
                 (sub.topics || []).map((item) => (item.name || item.title || '').trim().toLowerCase())
@@ -200,8 +305,11 @@ export default function AplusTrackScreen({ navigation }) {
               };
             }
             return sub;
-          })
-        );
+          });
+          cachedSubjectsData = updated;
+          persistAplusCache(userIdRef.current, updated, recommendation);
+          return updated;
+        });
 
         setAssignmentInputMap((prev) => ({ ...prev, [subjectId]: '' }));
         setExpandedDecomposerId(null);
@@ -233,8 +341,8 @@ export default function AplusTrackScreen({ navigation }) {
     const nextStatus = !currentStatus;
 
     // Optimistically update subject checklist and completion percentage
-    setSubjects((prevSubjects) =>
-      prevSubjects.map((sub) => {
+    setSubjects((prevSubjects) => {
+      const updated = prevSubjects.map((sub) => {
         if (sub.id !== subjectId) return sub;
         const updatedTopics = (sub.topics || []).map((t) => {
           const tName = (t.name || t.title || '').trim();
@@ -253,8 +361,11 @@ export default function AplusTrackScreen({ navigation }) {
           total_topics_count: totalCount,
           completion_percentage: newPct,
         };
-      })
-    );
+      });
+      cachedSubjectsData = updated;
+      persistAplusCache(userIdRef.current, updated, recommendation);
+      return updated;
+    });
 
     try {
       if (topicId) {
@@ -262,21 +373,24 @@ export default function AplusTrackScreen({ navigation }) {
         if (res?.data?.status === 'success' && res.data.progress_percentage !== undefined) {
           const verifiedPct = Math.round(res.data.progress_percentage);
           const verifiedComp = res.data.completed_topics;
-          setSubjects((prev) =>
-            prev.map((sub) => {
+          setSubjects((prev) => {
+            const updated = prev.map((sub) => {
               if (sub.id !== subjectId) return sub;
               return {
                 ...sub,
                 completion_percentage: verifiedPct,
                 completed_topics_count: verifiedComp !== undefined ? verifiedComp : sub.completed_topics_count,
               };
-            })
-          );
+            });
+            cachedSubjectsData = updated;
+            persistAplusCache(userIdRef.current, updated, recommendation);
+            return updated;
+          });
         }
       } else {
         // Fallback to legacy toggle endpoint by name
         await toggleSubjectTopic({
-          user_id: userId,
+          user_id: userIdRef.current || userId,
           subject_id: subjectId,
           topic_name: topicName,
           completed: nextStatus,
@@ -325,7 +439,7 @@ export default function AplusTrackScreen({ navigation }) {
           : ['Core Principles & Architecture', 'Key Proofs & Implementations', 'Exam Review & Practice Problems'];
 
       const payload = {
-        user_id: userId,
+        user_id: userIdRef.current || userId,
         name: trimmedName,
         target_grade: 'A+',
         difficulty: newDifficulty,
@@ -336,7 +450,12 @@ export default function AplusTrackScreen({ navigation }) {
       const res = await createAcademicSubject(payload);
       if (res?.data?.subject) {
         const created = res.data.subject;
-        setSubjects((prev) => [created, ...prev]);
+        setSubjects((prev) => {
+          const updated = [created, ...prev];
+          cachedSubjectsData = updated;
+          persistAplusCache(userIdRef.current, updated, recommendation);
+          return updated;
+        });
         setIsAddModalVisible(false);
         setNewSubjectName('');
         setNewDifficulty('High');
@@ -367,10 +486,12 @@ export default function AplusTrackScreen({ navigation }) {
           style: 'destructive',
           onPress: async () => {
             // Optimistic update
-            setSubjects((prev) => prev.filter((s) => s.id !== subjectId));
-            if (cachedSubjectsData) {
-              cachedSubjectsData = cachedSubjectsData.filter((s) => s.id !== subjectId);
-            }
+            setSubjects((prev) => {
+              const updated = prev.filter((s) => s.id !== subjectId);
+              cachedSubjectsData = updated;
+              persistAplusCache(userIdRef.current, updated, recommendation);
+              return updated;
+            });
             try {
               await deleteAcademicSubject(subjectId);
             } catch (error) {
@@ -388,6 +509,19 @@ export default function AplusTrackScreen({ navigation }) {
   const focusMinutes = isCrunchMode ? 25 : (recommendation?.focus_minutes || 35);
   const breakMinutes = isCrunchMode ? 5 : (recommendation?.break_minutes || 5);
 
+  // Filter subjects and their topics in real-time based on searchQuery
+  const filteredSubjects = subjects.filter((sub) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase().trim();
+    const nameMatch = (sub.name || '').toLowerCase().includes(q);
+    const targetMatch = (sub.target_grade || '').toLowerCase().includes(q);
+    const diffMatch = (sub.difficulty || '').toLowerCase().includes(q);
+    const topicMatch = (sub.topics || []).some((t) =>
+      (t.name || t.title || '').toLowerCase().includes(q)
+    );
+    return nameMatch || targetMatch || diffMatch || topicMatch;
+  });
+
   if (loading) {
     return (
       <View style={[styles.container, styles.loadingCenter]}>
@@ -398,59 +532,46 @@ export default function AplusTrackScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+    <View style={styles.container}>
+      {/* Ambient Translucent Mint-Teal & Soft Sky-Blue Circles */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
 
-      {/* Top Clinical Header Bar with Clean Standard Spacing (No Collisions) */}
-      <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.backBtn}
-          onPress={() => navigation.goBack()}
-          activeOpacity={0.8}
-          accessibilityLabel="Go back"
-        >
-          <ArrowLeft size={20} color="#0D9488" />
-        </TouchableOpacity>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" backgroundColor="#F0F7F6" />
 
-        <View style={styles.headerTitleBox}>
-          <Text style={styles.headerTitle}>A+ Track: Academic Resilience</Text>
-          <View style={styles.headerBadge}>
-            <Text style={styles.headerBadgeText}>Stress-Adapted Study Pacing</Text>
+        {/* Top Clinical Header Bar with Clean Standard Spacing (No Collisions) */}
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={() => navigation.goBack()}
+            activeOpacity={0.8}
+            accessibilityLabel="Go back"
+          >
+            <ArrowLeft size={20} color="#0D9488" />
+          </TouchableOpacity>
+
+          <View style={styles.headerTitleBox}>
+            <Text style={styles.headerTitle}>A+ Study Track</Text>
           </View>
+
+          {/* Balanced spacer preserving centered title alignment */}
+          <View style={{ width: 36 }} />
         </View>
 
-        <View style={styles.headerRightGroup}>
-          <TouchableOpacity
-            style={styles.headerAddBtn}
-            onPress={() => setIsAddModalVisible(true)}
-            activeOpacity={0.7}
-            accessibilityLabel="Enroll Subject"
-          >
-            <Plus size={18} color="#0D9488" />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerGearBtn}
-            onPress={() => navigation.navigate('Main', { screen: 'Profile' })}
-            activeOpacity={0.7}
-            accessibilityLabel="Settings"
-          >
-            <Settings size={18} color="#0D9488" />
-          </TouchableOpacity>
-        </View>
-      </View>
+        {/* Brief Clinical Toast / Notification */}
+        {toastMessage && (
+          <View style={styles.toastNotification}>
+            <CheckCircle2 size={16} color="#0D9488" style={{ marginRight: 8 }} />
+            <Text style={styles.toastNotificationText}>{toastMessage}</Text>
+          </View>
+        )}
 
-      {/* Brief Clinical Toast / Notification */}
-      {toastMessage && (
-        <View style={styles.toastNotification}>
-          <CheckCircle2 size={16} color="#0D9488" style={{ marginRight: 8 }} />
-          <Text style={styles.toastNotificationText}>{toastMessage}</Text>
-        </View>
-      )}
-
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingTop: 80, paddingBottom: 40, paddingHorizontal: 16 }}
-      >
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+        >
         {/* Discreet Clinical Exam Crunch Mode Banner */}
         {isCrunchMode && (
           <View style={styles.crunchModeBanner}>
@@ -460,6 +581,15 @@ export default function AplusTrackScreen({ navigation }) {
             </Text>
           </View>
         )}
+
+        {/* Top Study Hero Banner Card */}
+        <View style={styles.heroBannerCard}>
+          <Image
+            source={require('../../assets/images/A-plus-banner.jpg')}
+            style={styles.heroBannerImage}
+            resizeMode="cover"
+          />
+        </View>
 
         {/* De-cluttered Top Pacing Recommendation: "Today's Recommended Focus" */}
         <View style={styles.pacingBanner}>
@@ -474,10 +604,6 @@ export default function AplusTrackScreen({ navigation }) {
               </View>
             </View>
           </View>
-
-          <Text style={styles.pacingCopy}>
-            Based on your current balance, studying in short intervals prevents mental fatigue.
-          </Text>
 
           {/* Biometrics Status Row */}
           {recommendation?.biometrics && (
@@ -508,204 +634,240 @@ export default function AplusTrackScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
+        {/* Horizontal Action Row: Search Bar + Compact Teal + Enroll Button */}
+        <View style={styles.actionRow}>
+          <View style={styles.searchBarContainer}>
+            <Search size={16} color="#0D9488" style={{ marginRight: 8 }} />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search subjects or topics..."
+              placeholderTextColor="#94A3B8"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCapitalize="none"
+              autoCorrect={false}
+              clearButtonMode="while-editing"
+            />
+            {searchQuery.trim().length > 0 && (
+              <TouchableOpacity
+                onPress={() => setSearchQuery('')}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ padding: 2 }}
+              >
+                <X size={15} color="#94A3B8" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <TouchableOpacity
+            style={styles.topEnrollBtn}
+            onPress={() => setIsAddModalVisible(true)}
+            activeOpacity={0.85}
+            accessibilityLabel="Enroll New Subject"
+          >
+            <Plus size={16} color="#FFFFFF" style={{ marginRight: 4 }} />
+            <Text style={styles.topEnrollBtnText}>Enroll</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Section Heading & Subject Count */}
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionHeaderTitle}>Enrolled Subjects & Modules</Text>
           <View style={styles.subjectCountBadge}>
             <Text style={styles.subjectCountText}>
-              {subjects.length} {subjects.length === 1 ? 'Subject' : 'Subjects'}
+              {searchQuery.trim().length > 0
+                ? `${filteredSubjects.length} of ${subjects.length}`
+                : `${subjects.length} ${subjects.length === 1 ? 'Subject' : 'Subjects'}`}
             </Text>
           </View>
         </View>
 
-        {/* Clean Subject Cards */}
-        {subjects.map((sub) => {
-          const rawTopics = sub.topics || [];
-          // Deduplicate items by title before rendering
-          const seenRenderTitles = new Set();
-          const topics = [];
-          for (const top of rawTopics) {
-            const titleKey = (top.name || top.title || '').trim().toLowerCase();
-            if (titleKey && !seenRenderTitles.has(titleKey)) {
-              seenRenderTitles.add(titleKey);
-              topics.push(top);
+        {/* Clean Subject Cards or Empty State Card */}
+        {subjects.length === 0 ? (
+          <View style={styles.emptyStateCard}>
+            <GraduationCap size={36} color="#0D9488" style={{ marginBottom: 10 }} />
+            <Text style={styles.emptyStateTitle}>No Enrolled Subjects</Text>
+            <Text style={styles.emptyStateSub}>
+              No subjects enrolled yet. Add your modules and exam dates to unlock stress-adapted study pacing.
+            </Text>
+            <TouchableOpacity
+              style={styles.emptyStateAddBtn}
+              onPress={() => setIsAddModalVisible(true)}
+              activeOpacity={0.85}
+            >
+              <Plus size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.emptyStateAddBtnText}>Add Your First Subject</Text>
+            </TouchableOpacity>
+          </View>
+        ) : filteredSubjects.length === 0 ? (
+          <View style={styles.emptyStateCard}>
+            <BookOpen size={32} color="#0D9488" style={{ marginBottom: 10 }} />
+            <Text style={styles.emptyStateTitle}>No Matching Subjects</Text>
+            <Text style={styles.emptyStateSub}>
+              No enrolled subjects or topics match "{searchQuery}".
+            </Text>
+            <TouchableOpacity
+              style={styles.clearSearchBtn}
+              onPress={() => setSearchQuery('')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.clearSearchBtnText}>Clear Search</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          filteredSubjects.map((sub) => {
+            const rawTopics = sub.topics || [];
+            // Deduplicate items by title before rendering
+            const seenRenderTitles = new Set();
+            const topics = [];
+            for (const top of rawTopics) {
+              const titleKey = (top.name || top.title || '').trim().toLowerCase();
+              if (titleKey && !seenRenderTitles.has(titleKey)) {
+                seenRenderTitles.add(titleKey);
+                topics.push(top);
+              }
             }
-          }
 
-          const completedCount = topics.filter((t) => t.completed).length;
-          const totalCount = topics.length;
-          const completionPct = totalCount > 0
-            ? Math.round((completedCount / totalCount) * 100)
-            : (sub.completion_percentage || 0);
-          const daysRem = sub.days_remaining !== undefined ? sub.days_remaining : 14;
+            const completedCount = topics.filter((t) => t.completed).length;
+            const totalCount = topics.length;
+            const completionPct = totalCount > 0
+              ? Math.round((completedCount / totalCount) * 100)
+              : (sub.completion_percentage || 0);
+            const daysRem = sub.days_remaining !== undefined ? sub.days_remaining : 14;
 
-          return (
-            <View key={sub.id} style={styles.subjectCard}>
-              {/* Header: Subject Name + Delete Trash Icon Button */}
-              <View style={styles.subjectCardHeader}>
-                <Text style={styles.subjectName}>{sub.name}</Text>
-                <TouchableOpacity
-                  style={styles.deleteSubjectBtn}
-                  onPress={() => handleDeleteSubject(sub.id, sub.name)}
-                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                  activeOpacity={0.7}
-                  accessibilityLabel="Delete subject"
-                >
-                  <Trash2 size={16} color="#94A3B8" />
-                </TouchableOpacity>
-              </View>
-
-              {/* Metadata Badges: [Target: A+] [Difficulty: High/Medium/Low] [X days remaining] */}
-              <View style={styles.metadataBadgesRow}>
-                <View style={styles.targetGradePill}>
-                  <Award size={12} color="#0D9488" />
-                  <Text style={styles.targetGradeText}>Target: {sub.target_grade || 'A+'}</Text>
-                </View>
-
-                <View
-                  style={[
-                    styles.diffBadge,
-                    sub.difficulty === 'High' && styles.diffBadgeHigh,
-                    sub.difficulty === 'Medium' && styles.diffBadgeMed,
-                    sub.difficulty === 'Low' && styles.diffBadgeLow,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.diffBadgeText,
-                      sub.difficulty === 'High' && styles.diffBadgeTextHigh,
-                      sub.difficulty === 'Medium' && styles.diffBadgeTextMed,
-                      sub.difficulty === 'Low' && styles.diffBadgeTextLow,
-                    ]}
+            return (
+              <View key={sub.id} style={styles.subjectCard}>
+                {/* Header: Subject Name + Delete Trash Icon Button */}
+                <View style={styles.subjectCardHeader}>
+                  <Text style={styles.subjectName}>{sub.name}</Text>
+                  <TouchableOpacity
+                    style={styles.deleteSubjectBtn}
+                    onPress={() => handleDeleteSubject(sub.id, sub.name)}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                    activeOpacity={0.7}
+                    accessibilityLabel="Delete subject"
                   >
-                    Difficulty: {sub.difficulty || 'High'}
-                  </Text>
+                    <Trash2 size={16} color="#94A3B8" />
+                  </TouchableOpacity>
                 </View>
 
-                <View style={styles.daysRemainingBadge}>
-                  <Calendar size={11} color="#64748B" />
-                  <Text style={styles.daysRemainingText}>
-                    {daysRem === 0 ? 'Exam Today' : `${daysRem} days remaining`}
-                  </Text>
+                {/* Consolidated Metadata Badges Row: [A+ Target • High • 16d left] */}
+                <View style={styles.compactMetaRow}>
+                  <View style={styles.compactMetaPill}>
+                    <Award size={12} color="#0D9488" style={{ marginRight: 4 }} />
+                    <Text style={styles.compactMetaText}>
+                      {sub.target_grade || 'A+'} Target • {sub.difficulty || 'High'} • {daysRem === 0 ? 'Exam Today' : `${daysRem}d left`}
+                    </Text>
+                  </View>
                 </View>
-              </View>
 
-              {/* Dynamic Progress Bar */}
-              <View style={styles.progressContainer}>
-                <View style={styles.progressLabelRow}>
-                  <Text style={styles.progressTitle}>Topic Mastery</Text>
-                  <Text style={styles.progressPercentage}>
-                    {completedCount}/{totalCount} Completed ({completionPct}%)
-                  </Text>
+                {/* Dynamic Progress Bar */}
+                <View style={styles.progressContainer}>
+                  <View style={styles.progressLabelRow}>
+                    <Text style={styles.progressTitle}>Topic Mastery</Text>
+                    <Text style={styles.progressPercentage}>
+                      {completedCount}/{totalCount} Completed ({completionPct}%)
+                    </Text>
+                  </View>
+                  <View style={styles.progressBarTrack}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${Math.max(0, Math.min(100, completionPct))}%`,
+                          backgroundColor: completionPct >= 80 ? '#0D9488' : '#14B8A6',
+                        },
+                      ]}
+                    />
+                  </View>
                 </View>
-                <View style={styles.progressBarTrack}>
-                  <View
-                    style={[
-                      styles.progressBarFill,
-                      {
-                        width: `${Math.max(0, Math.min(100, completionPct))}%`,
-                        backgroundColor: completionPct >= 80 ? '#0D9488' : '#14B8A6',
-                      },
-                    ]}
-                  />
-                </View>
-              </View>
 
-              {/* Topic Mastery Checklist: Interactive checkbox + Topic name */}
-              <View style={styles.checklistSection}>
-                {topics.length > 0 ? (
-                  topics.map((topic, idx) => {
-                    const isCompleted = Boolean(topic.completed);
-                    const topicTitle = topic.name || topic.title;
-                    return (
-                      <TouchableOpacity
-                        key={topic.id || `${sub.id}-${topicTitle}-${idx}`}
-                        style={styles.topicCheckRow}
-                        onPress={() => handleToggleTopic(sub.id, topic)}
-                        activeOpacity={0.7}
-                      >
-                        {isCompleted ? (
-                          <CheckCircle2 size={19} color="#0D9488" />
-                        ) : (
-                          <Circle size={19} color="#CBD5E1" />
-                        )}
-                        <Text
-                          style={[
-                            styles.topicTitle,
-                            isCompleted && styles.topicTitleCompleted,
-                          ]}
+                {/* Topic Mastery Checklist: Interactive checkbox + Topic name */}
+                <View style={styles.checklistSection}>
+                  {topics.length > 0 ? (
+                    topics.map((topic, idx) => {
+                      const isCompleted = Boolean(topic.completed);
+                      const topicTitle = topic.name || topic.title;
+                      return (
+                        <TouchableOpacity
+                          key={topic.id || `${sub.id}-${topicTitle}-${idx}`}
+                          style={styles.topicCheckRow}
+                          onPress={() => handleToggleTopic(sub.id, topic)}
+                          activeOpacity={0.7}
                         >
-                          {topicTitle}
+                          {isCompleted ? (
+                            <CheckCircle2 size={19} color="#0D9488" />
+                          ) : (
+                            <Circle size={19} color="#CBD5E1" />
+                          )}
+                          <Text
+                            style={[
+                              styles.topicTitle,
+                              isCompleted && styles.topicTitleCompleted,
+                            ]}
+                          >
+                            {topicTitle}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })
+                  ) : (
+                    <Text style={styles.noTopicsText}>No modules enrolled yet.</Text>
+                  )}
+                </View>
+
+                {/* Expandable Task Decomposer Section */}
+                <View style={styles.decomposerContainer}>
+                  <TouchableOpacity
+                    style={styles.decomposerToggleBtn}
+                    onPress={() => setExpandedDecomposerId((prev) => (prev === sub.id ? null : sub.id))}
+                    activeOpacity={0.7}
+                    accessibilityLabel="Deconstruct Assignment Workload"
+                  >
+                    <View style={styles.decomposerToggleLeft}>
+                      <Ionicons name="document-text-outline" size={16} color="#0D9488" style={{ marginRight: 8 }} />
+                      <Text style={styles.decomposerToggleTitle}>Deconstruct Assignment Workload</Text>
+                    </View>
+                    <ChevronDown
+                      size={16}
+                      color="#0D9488"
+                      style={{ transform: [{ rotate: expandedDecomposerId === sub.id ? '180deg' : '0deg' }] }}
+                    />
+                  </TouchableOpacity>
+
+                  {expandedDecomposerId === sub.id && (
+                    <View style={styles.decomposerContent}>
+                      <TextInput
+                        style={styles.decomposerTextInput}
+                        placeholder="Paste coursework requirements or project topics..."
+                        placeholderTextColor="#94A3B8"
+                        multiline
+                        numberOfLines={3}
+                        value={assignmentInputMap[sub.id] || ''}
+                        onChangeText={(val) => setAssignmentInputMap((prev) => ({ ...prev, [sub.id]: val }))}
+                      />
+                      <TouchableOpacity
+                        style={styles.decomposerActionBtn}
+                        onPress={() => handleDecomposeTasks(sub.id)}
+                        disabled={decomposingLoadingId === sub.id}
+                        activeOpacity={0.8}
+                      >
+                        {decomposingLoadingId === sub.id ? (
+                          <ActivityIndicator size="small" color="#0D9488" style={{ marginRight: 6 }} />
+                        ) : (
+                          <Ionicons name="document-text-outline" size={15} color="#0D9488" style={{ marginRight: 6 }} />
+                        )}
+                        <Text style={styles.decomposerActionBtnText}>
+                          {decomposingLoadingId === sub.id ? 'Deconstructing Tasks...' : 'Break Down Tasks'}
                         </Text>
                       </TouchableOpacity>
-                    );
-                  })
-                ) : (
-                  <Text style={styles.noTopicsText}>No modules enrolled yet.</Text>
-                )}
+                    </View>
+                  )}
+                </View>
               </View>
-
-              {/* Expandable Task Decomposer Section */}
-              <View style={styles.decomposerContainer}>
-                <TouchableOpacity
-                  style={styles.decomposerToggleBtn}
-                  onPress={() => setExpandedDecomposerId((prev) => (prev === sub.id ? null : sub.id))}
-                  activeOpacity={0.7}
-                  accessibilityLabel="Deconstruct Assignment Workload"
-                >
-                  <View style={styles.decomposerToggleLeft}>
-                    <Ionicons name="document-text-outline" size={16} color="#0D9488" style={{ marginRight: 8 }} />
-                    <Text style={styles.decomposerToggleTitle}>Deconstruct Assignment Workload</Text>
-                  </View>
-                  <ChevronDown
-                    size={16}
-                    color="#0D9488"
-                    style={{ transform: [{ rotate: expandedDecomposerId === sub.id ? '180deg' : '0deg' }] }}
-                  />
-                </TouchableOpacity>
-
-                {expandedDecomposerId === sub.id && (
-                  <View style={styles.decomposerContent}>
-                    <TextInput
-                      style={styles.decomposerTextInput}
-                      placeholder="Paste coursework requirements or project topics..."
-                      placeholderTextColor="#94A3B8"
-                      multiline
-                      numberOfLines={3}
-                      value={assignmentInputMap[sub.id] || ''}
-                      onChangeText={(val) => setAssignmentInputMap((prev) => ({ ...prev, [sub.id]: val }))}
-                    />
-                    <TouchableOpacity
-                      style={styles.decomposerActionBtn}
-                      onPress={() => handleDecomposeTasks(sub.id)}
-                      disabled={decomposingLoadingId === sub.id}
-                      activeOpacity={0.8}
-                    >
-                      {decomposingLoadingId === sub.id ? (
-                        <ActivityIndicator size="small" color="#0D9488" style={{ marginRight: 6 }} />
-                      ) : (
-                        <Ionicons name="document-text-outline" size={15} color="#0D9488" style={{ marginRight: 6 }} />
-                      )}
-                      <Text style={styles.decomposerActionBtnText}>
-                        {decomposingLoadingId === sub.id ? 'Deconstructing Tasks...' : 'Break Down Tasks'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-            </View>
-          );
-        })}
-
-        {/* Enroll New Subject Button */}
-        <TouchableOpacity
-          style={styles.enrollDashedBtn}
-          onPress={() => setIsAddModalVisible(true)}
-          activeOpacity={0.8}
-        >
-          <Plus size={18} color="#0D9488" style={{ marginRight: 6 }} />
-          <Text style={styles.enrollDashedText}>Enroll New Subject</Text>
-        </TouchableOpacity>
+            );
+          })
+        )}
       </ScrollView>
 
       {/* --- INTERACTIVE "ADD SUBJECT & MODULE" MODAL --- */}
@@ -847,14 +1009,19 @@ export default function AplusTrackScreen({ navigation }) {
           </View>
         </KeyboardAvoidingView>
       </Modal>
-    </SafeAreaView>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F0F7F6',
+    position: 'relative',
+  },
+  safeArea: {
+    flex: 1,
   },
   loadingCenter: {
     justifyContent: 'center',
@@ -866,6 +1033,34 @@ const styles = StyleSheet.create({
     color: '#0D9488',
     fontWeight: '600',
   },
+  // Ambient Translucent Mint-Teal & Soft Sky-Blue Circles
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(45, 212, 191, 0.22)',
+  },
+  ambientOrbMiddle: {
+    position: 'absolute',
+    top: 360,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.18)',
+  },
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: 80,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -873,18 +1068,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#E2E8F0',
-    backgroundColor: '#FFFFFF',
+    borderBottomColor: 'rgba(226, 232, 240, 0.7)',
+    backgroundColor: 'rgba(255, 255, 255, 0.85)',
   },
   backBtn: {
     width: 36,
     height: 36,
     borderRadius: 10,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
   },
   headerTitleBox: {
     alignItems: 'center',
@@ -910,34 +1110,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.2,
   },
-  headerRightGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  headerAddBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerGearBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   scrollContent: {
     paddingHorizontal: 16,
-    paddingTop: 80,
+    paddingTop: 12,
     paddingBottom: 40,
   },
   toastNotification: {
@@ -956,17 +1131,18 @@ const styles = StyleSheet.create({
     color: '#0F766E',
   },
   pacingBanner: {
-    backgroundColor: '#F0FDFA',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
     borderWidth: 1.5,
-    borderColor: '#99F6E4',
-    borderRadius: 18,
+    borderColor: '#FFFFFF',
+    borderRadius: 22,
     padding: 16,
+    marginTop: 0,
     marginBottom: 20,
-    elevation: 1,
-    shadowColor: '#0D9488',
+    elevation: 2,
+    shadowColor: '#64748B',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
   },
   pacingBannerTop: {
     flexDirection: 'row',
@@ -1066,17 +1242,17 @@ const styles = StyleSheet.create({
     color: '#475569',
   },
   subjectCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
     padding: 16,
     marginBottom: 16,
-    elevation: 1,
+    elevation: 2,
     shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 5,
   },
   subjectCardHeader: {
     position: 'relative',
@@ -1102,74 +1278,72 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  metadataBadgesRow: {
+  compactMetaRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
+    alignItems: 'center',
     marginBottom: 12,
   },
-  targetGradePill: {
+  compactMetaPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
     backgroundColor: '#F0FDFA',
     borderWidth: 1,
     borderColor: '#CCFBF1',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
   },
-  targetGradeText: {
-    fontSize: 11,
+  compactMetaText: {
+    fontSize: 11.5,
     fontWeight: '700',
-    color: '#0D9488',
+    color: '#0F766E',
   },
-  diffBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    borderWidth: 1,
-  },
-  diffBadgeHigh: {
-    backgroundColor: '#FEF2F2',
-    borderColor: '#FECACA',
-  },
-  diffBadgeMed: {
-    backgroundColor: '#FFFBEB',
-    borderColor: '#FDE68A',
-  },
-  diffBadgeLow: {
-    backgroundColor: '#F0FDFA',
-    borderColor: '#CCFBF1',
-  },
-  diffBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  diffBadgeTextHigh: {
-    color: '#DC2626',
-  },
-  diffBadgeTextMed: {
-    color: '#D97706',
-  },
-  diffBadgeTextLow: {
-    color: '#0D9488',
-  },
-  daysRemainingBadge: {
-    flexDirection: 'row',
+  emptyStateCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 24,
     alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
+    marginBottom: 20,
+    elevation: 2,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 5,
   },
-  daysRemainingText: {
-    fontSize: 11,
-    fontWeight: '600',
+  emptyStateTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 6,
+  },
+  emptyStateSub: {
+    fontSize: 13,
     color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 19,
+    marginBottom: 16,
+    paddingHorizontal: 8,
+  },
+  emptyStateAddBtn: {
+    backgroundColor: '#0D9488',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    borderRadius: 14,
+    elevation: 2,
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
+  emptyStateAddBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13.5,
+    fontWeight: '700',
   },
   progressContainer: {
     marginBottom: 14,
@@ -1230,22 +1404,110 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontStyle: 'italic',
   },
-  enrollDashedBtn: {
+  // Top Study Hero Banner Card
+  heroBannerCard: {
+    borderRadius: 22,
+    overflow: 'hidden',
     borderWidth: 1.5,
-    borderStyle: 'dashed',
-    borderColor: '#0D9488',
-    backgroundColor: '#F0FDFA',
-    borderRadius: 14,
-    paddingVertical: 14,
+    borderColor: '#FFFFFF',
+    marginBottom: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 3,
+    position: 'relative',
+  },
+  heroBannerImage: {
+    height: 135,
+    width: '100%',
+  },
+  heroBannerOverlayBadge: {
+    position: 'absolute',
+    bottom: 10,
+    left: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    elevation: 2,
   },
-  enrollDashedText: {
+  heroBannerOverlayBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0F766E',
+    letterSpacing: 0.2,
+  },
+
+  // Horizontal Action Row: Search Bar + Compact Teal + Enroll Button
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 14,
+  },
+  searchBarContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.90)',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    paddingHorizontal: 12,
+    height: 46,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: '#0F172A',
+    paddingVertical: 0,
+  },
+  topEnrollBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0D9488',
+    height: 46,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  topEnrollBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  clearSearchBtn: {
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#0D9488',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  clearSearchBtnText: {
     color: '#0D9488',
-    fontSize: 14,
-    fontWeight: '800',
+    fontSize: 12.5,
+    fontWeight: '700',
   },
   modalOverlay: {
     flex: 1,

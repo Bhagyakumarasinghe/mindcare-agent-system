@@ -1,4 +1,5 @@
 import React from 'react';
+import { View, Platform } from 'react-native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Home, MessageCircle, BarChart2, Wind, User } from 'lucide-react-native';
@@ -36,27 +37,54 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
+        tabBarHideOnKeyboard: true,
         tabBarActiveTintColor: '#0D9488',
-        tabBarInactiveTintColor: '#94A3B8',
-        tabBarStyle: { 
-          height: 68, 
-          paddingBottom: 10, 
+        tabBarInactiveTintColor: '#64748B',
+        tabBarStyle: {
+          position: 'absolute',
+          bottom: 16,
+          left: 16,
+          right: 16,
+          height: 68,
+          borderRadius: 28,
+          backgroundColor: 'rgba(255, 255, 255, 0.94)',
+          borderWidth: 1.5,
+          borderColor: '#FFFFFF',
+          paddingBottom: Platform.OS === 'ios' ? 12 : 8,
           paddingTop: 8,
-          backgroundColor: '#FFFFFF', 
-          borderTopWidth: 1,
-          borderTopColor: '#E2E8F0',
-          elevation: 4,
+          elevation: 10,
           shadowColor: '#64748B',
-          shadowOffset: { width: 0, height: -2 },
-          shadowOpacity: 0.04,
-          shadowRadius: 8,
+          shadowOffset: { width: 0, height: 6 },
+          shadowOpacity: 0.12,
+          shadowRadius: 16,
         },
-        tabBarIcon: ({ color, size }) => {
-          if (route.name === 'Home') return <Home color={color} size={size} />;
-          if (route.name === 'Chat') return <MessageCircle color={color} size={size} />;
-          if (route.name === 'Analytics') return <BarChart2 color={color} size={size} />;
-          if (route.name === 'Relax') return <Wind color={color} size={size} />;
-          if (route.name === 'Profile') return <User color={color} size={size} />;
+        tabBarLabelStyle: {
+          fontSize: 11,
+          fontWeight: '700',
+          letterSpacing: 0.2,
+        },
+        tabBarIcon: ({ color, focused, size }) => {
+          let IconComponent;
+          if (route.name === 'Home') IconComponent = Home;
+          else if (route.name === 'Chat') IconComponent = MessageCircle;
+          else if (route.name === 'Analytics') IconComponent = BarChart2;
+          else if (route.name === 'Relax') IconComponent = Wind;
+          else if (route.name === 'Profile') IconComponent = User;
+
+          return (
+            <View
+              style={{
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: focused ? '#CCFBF1' : 'transparent',
+                borderRadius: 14,
+                paddingHorizontal: 12,
+                paddingVertical: 3,
+              }}
+            >
+              <IconComponent color={color} size={20} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          );
         },
       })}
     >
@@ -85,13 +113,17 @@ export default function AppNavigator() {
       <Stack.Screen name="Assessment" component={AssessmentScreen} /> 
       
       {/* Sub-Screens */}
+      <Stack.Screen name="Breathing" component={BreathingExercise} />
       <Stack.Screen name="BreathingExercise" component={BreathingExercise} />
+      <Stack.Screen name="BreathingScreen" component={BreathingExercise} />
       <Stack.Screen name="FocusTimer" component={FocusTimer} />
+      <Stack.Screen name="FocusTimerScreen" component={FocusTimer} />
       <Stack.Screen name="Journaling" component={JournalScreen} />
       <Stack.Screen name="JournalScreen" component={JournalScreen} />
       <Stack.Screen name="ReflectiveJournalScreen" component={JournalScreen} />
       <Stack.Screen name="Meditation" component={MeditationScreen} />
       <Stack.Screen name="MeditationScreen" component={MeditationScreen} />
+      <Stack.Screen name="GuidedMeditationScreen" component={MeditationScreen} />
       <Stack.Screen name="WeeklyReport" component={WeeklyReportScreen} /> 
       <Stack.Screen name="AplusTrack" component={AplusTrackScreen} /> 
       <Stack.Screen name="AplusTrackScreen" component={AplusTrackScreen} /> 

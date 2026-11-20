@@ -5,50 +5,59 @@ import {
   StyleSheet, 
   ScrollView, 
   TouchableOpacity, 
-  TextInput, 
   ActivityIndicator, 
-  Alert,
-  Modal,
-  Animated,
-  Easing
+  Image,
+  ImageBackground,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
-  Wind, 
   Clock, 
-  BookOpen, 
-  Headphones, 
-  PlayCircle, 
-  PauseCircle,
-  Play, 
-  Pause,
-  RotateCcw,
-  Volume2,
-  VolumeX,
-  X,
-  Edit3,
   Lightbulb, 
-  CheckCircle2, 
-  Heart,
-  Brain,
-  ShieldCheck,
-  Award,
   ChevronRight,
-  GraduationCap
+  RefreshCw,
 } from 'lucide-react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createSafeAudioPlayer } from '../utils/safeAudio';
-import { analyzeAndRecordJournal, getUserProfile, getAcademicPacing } from '../api/authService';
+import { getUserProfile, getAcademicPacing, getDailyTip } from '../api/authService';
 
-const BASE_URL = 'http://10.234.214.156:8000'; 
-const TOTAL_MEDITATION_SECONDS = 5 * 60; // 5 Minutes (300 Seconds)
-const TOTAL_BOX_BREATHING_SECONDS = 120; // 2 Minutes (120 Seconds)
+const BASE_URL = 'http://10.234.214.156:8000';
+
+// 5 Bundled High-Resolution Calming Stress Banner Photographs with Dynamic Thematic Copy
+const BANNER_SLIDES = [
+  {
+    image: require('../../assets/images/stress-banner-1.jpg'),
+    tag: 'NERVOUS SYSTEM REGULATION',
+    title: 'Pause, breathe, and reset your nervous system',
+  },
+  {
+    image: require('../../assets/images/stress-banner-2.jpg'),
+    tag: 'COGNITIVE CLARITY',
+    title: 'Structure your study blocks for calm, deep focus',
+  },
+  {
+    image: require('../../assets/images/stress-banner-3.jpg'),
+    tag: 'MINDFUL SANCTUARY',
+    title: 'Quiet mental noise with guided audio stillness',
+  },
+  {
+    image: require('../../assets/images/stress-banner-4.jpg'),
+    tag: 'EMOTIONAL GROUNDING',
+    title: 'Release academic pressure through gentle reflection',
+  },
+  {
+    image: require('../../assets/images/stress-banner-5.jpg'),
+    tag: 'EXAM & VIVA RESILIENCE',
+    title: 'Build steady confidence one mindful step at a time',
+  },
+];
 
 const RelaxScreen = ({ navigation }) => {
   const [dailyTip, setDailyTip] = useState('Taking just 5 minutes for mindful breathing can significantly reduce sympathetic nervous arousal.');
   const [loadingTip, setLoadingTip] = useState(false);
   const [activeUserId, setActiveUserId] = useState('demo_user');
+
+  // Hero Banner Auto-Slide State (4000ms cycle)
+  const [activeBannerIndex, setActiveBannerIndex] = useState(0);
 
   // Academic Cognitive Pacing State ("A+ Track")
   const [pacingData, setPacingData] = useState({
@@ -60,15 +69,15 @@ const RelaxScreen = ({ navigation }) => {
   const [loadingPacing, setLoadingPacing] = useState(false);
   const [isCrunchMode, setIsCrunchMode] = useState(false);
 
-  // Dedicated 2-Minute Pre-Exam Box Breathing State
-  const [isBoxBreathingModalVisible, setIsBoxBreathingModalVisible] = useState(false);
-  const [boxSecondsLeft, setBoxSecondsLeft] = useState(TOTAL_BOX_BREATHING_SECONDS);
-  const [isBoxActive, setIsBoxActive] = useState(false);
+  // Hero Banner Auto-slide cycle every 4000ms
+  useEffect(() => {
+    const bannerTimer = setInterval(() => {
+      setActiveBannerIndex((prev) => (prev + 1) % BANNER_SLIDES.length);
+    }, 4000);
+    return () => clearInterval(bannerTimer);
+  }, []);
 
-  // Box Breathing Pulse Animation Refs (4s Inhale, 4s Hold, 4s Exhale, 4s Hold)
-  const boxPulseAnim = useRef(new Animated.Value(1)).current;
-  const boxPulseOpacity = useRef(new Animated.Value(0.4)).current;
-  const boxLoopRef = useRef(null);
+  const activeSlide = BANNER_SLIDES[activeBannerIndex] || BANNER_SLIDES[0];
 
   // Dynamic Data Fetching for Academic Pacing on Screen Focus
   const fetchAcademicPacing = useCallback(async () => {
@@ -112,147 +121,107 @@ const RelaxScreen = ({ navigation }) => {
   );
 
   useEffect(() => {
+    // 1. Immediately hydrate cached daily tip from AsyncStorage for instant render
+    const hydrateCachedTip = async () => {
+      try {
+        const cached = await AsyncStorage.getItem('@mindcare_cached_daily_tip');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed?.tip) {
+            setDailyTip(parsed.tip);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+    hydrateCachedTip();
     fetchUserDataAndTip();
   }, []);
 
-  // Box Breathing Animation Cycle (16s full cycle: 4s Inhale, 4s Hold, 4s Exhale, 4s Hold)
-  const startBoxBreathingCycle = () => {
-    boxPulseAnim.setValue(1);
-    boxPulseOpacity.setValue(0.4);
-    boxLoopRef.current = Animated.loop(
-      Animated.sequence([
-        // 1. Inhale (4s) - expands smoothly
-        Animated.parallel([
-          Animated.timing(boxPulseAnim, {
-            toValue: 1.38,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(boxPulseOpacity, {
-            toValue: 0.85,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ]),
-        // 2. Hold (4s) - sustains expansion
-        Animated.delay(4000),
-        // 3. Exhale (4s) - contracts smoothly
-        Animated.parallel([
-          Animated.timing(boxPulseAnim, {
-            toValue: 1.0,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(boxPulseOpacity, {
-            toValue: 0.4,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ]),
-        // 4. Hold (4s) - rests at baseline
-        Animated.delay(4000),
-      ])
-    );
-    boxLoopRef.current.start();
-  };
-
-  const stopBoxBreathingCycle = () => {
-    if (boxLoopRef.current) {
-      boxLoopRef.current.stop();
-      boxLoopRef.current = null;
-    }
-    boxPulseAnim.setValue(1);
-    boxPulseOpacity.setValue(0.4);
-  };
-
-  // Box Breathing countdown tick (120s)
-  useEffect(() => {
-    let interval = null;
-    if (isBoxBreathingModalVisible && isBoxActive) {
-      interval = setInterval(() => {
-        setBoxSecondsLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            handleCompleteBoxBreathing();
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else {
-      clearInterval(interval);
-    }
-    return () => clearInterval(interval);
-  }, [isBoxBreathingModalVisible, isBoxActive]);
-
-  const handleOpenBoxBreathing = () => {
-    setBoxSecondsLeft(TOTAL_BOX_BREATHING_SECONDS);
-    setIsBoxActive(true);
-    setIsBoxBreathingModalVisible(true);
-    startBoxBreathingCycle();
-  };
-
-  const handleCloseBoxBreathing = () => {
-    stopBoxBreathingCycle();
-    setIsBoxActive(false);
-    setBoxSecondsLeft(TOTAL_BOX_BREATHING_SECONDS);
-    setIsBoxBreathingModalVisible(false);
-  };
-
-  const handleCompleteBoxBreathing = () => {
-    stopBoxBreathingCycle();
-    setIsBoxActive(false);
-    Alert.alert(
-      "Grounding Complete 🧘",
-      "2 minutes of clinical box breathing finished. Your autonomic tone is regulated and mental clarity is restored for academic focus.",
-      [{ text: "Done", onPress: handleCloseBoxBreathing }]
-    );
-  };
-
-  const fetchUserDataAndTip = async () => {
+  const fetchUserDataAndTip = async (forcedUserId = null) => {
     setLoadingTip(true);
-    try {
-      const userRes = await getUserProfile();
-      if (userRes?.data?.id) {
-        setActiveUserId(userRes.data.id);
+    let resolvedUserId = forcedUserId || activeUserId;
+
+    // 1. Resolve user ID from cached profile if not already set
+    if (!resolvedUserId || resolvedUserId === 'demo_user') {
+      try {
+        const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+        if (cachedProf) {
+          const parsed = JSON.parse(cachedProf);
+          if (parsed?.id || parsed?.user_id) {
+            resolvedUserId = parsed.id || parsed.user_id;
+            setActiveUserId(resolvedUserId);
+          }
+        }
+      } catch (e) {
+        // ignore
       }
-    } catch (e) {
-      console.log('Using default user identifier for tips');
     }
 
+    // 2. Fallback to getUserProfile() if still unresolved
+    if (!resolvedUserId || resolvedUserId === 'demo_user') {
+      try {
+        const userRes = await getUserProfile();
+        if (userRes?.data?.id) {
+          resolvedUserId = userRes.data.id;
+          setActiveUserId(resolvedUserId);
+        }
+      } catch (e) {
+        console.log('Using default user identifier for tips');
+      }
+    }
+
+    // 3. Fetch immediate micro-action tip from backend (passing user_id)
     try {
-      const response = await fetch(`${BASE_URL}/user/daily-tip`);
-      const data = await response.json();
-      if (data && data.tip) {
-        setDailyTip(data.tip);
+      const tipRes = await getDailyTip(resolvedUserId && resolvedUserId !== 'demo_user' ? resolvedUserId : null);
+      if (tipRes?.data?.tip) {
+        setDailyTip(tipRes.data.tip);
+        await AsyncStorage.setItem(
+          '@mindcare_cached_daily_tip',
+          JSON.stringify({
+            tip: tipRes.data.tip,
+            personalized: Boolean(tipRes.data.personalized),
+            timestamp: Date.now(),
+          })
+        );
       }
     } catch (error) {
-      console.log('Error fetching daily tip, using default clinical tip:', error);
+      // Direct fetch fallback if axios interceptor encountered network issues
+      try {
+        const queryParam = resolvedUserId && resolvedUserId !== 'demo_user' ? `?user_id=${encodeURIComponent(resolvedUserId)}` : '';
+        const response = await fetch(`${BASE_URL}/user/daily-tip${queryParam}`);
+        const data = await response.json();
+        if (data && data.tip) {
+          setDailyTip(data.tip);
+          await AsyncStorage.setItem(
+            '@mindcare_cached_daily_tip',
+            JSON.stringify({
+              tip: data.tip,
+              personalized: Boolean(data.personalized),
+              timestamp: Date.now(),
+            })
+          );
+        }
+      } catch (fallbackError) {
+        console.log('Error fetching daily tip, keeping current tip:', fallbackError);
+      }
     } finally {
       setLoadingTip(false);
     }
   };
 
-  const formatTime = (seconds) => {
-    const clamped = Math.max(0, seconds);
-    const m = Math.floor(clamped / 60);
-    const s = clamped % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
   // Protocols List (Prioritizes 2-minute Instant Decompression Breathing when Exam Crunch Mode is active)
   const instantDecompressionOption = {
     id: 'crunch-box-breathing',
-    title: 'Instant Decompression Breathing',
+    title: 'Instant Decompression',
     desc: '2-minute rapid autonomic box breathing reset for pre-exam states',
-    icon: <Wind size={24} color="#0D9488" />,
-    bgColor: '#CCFBF1',
-    isModalAction: true,
-    action: handleOpenBoxBreathing
+    image: require('../../assets/images/instant-breathing.jpg'),
+    action: () => navigation.navigate('Breathing', {
+      mode: 'instant_decompression',
+      durationMinutes: 2,
+      title: 'Instant Decompression',
+    }),
   };
 
   const baseOptions = [
@@ -260,975 +229,466 @@ const RelaxScreen = ({ navigation }) => {
       id: '1', 
       title: 'Breathing Exercise', 
       desc: 'Calm autonomic arousal with guided breathwork', 
-      icon: <Wind size={24} color="#0D9488" />, 
-      bgColor: '#F0FDFA',
+      image: require('../../assets/images/breathing-exercise.jpg'),
       route: 'BreathingExercise'
     },
     { 
       id: '2', 
       title: 'Focus Timer', 
       desc: 'Structured Pomodoro intervals for cognitive pacing', 
-      icon: <Clock size={24} color="#0D9488" />, 
-      bgColor: '#F0FDFA',
+      image: require('../../assets/images/focus-timer.jpg'),
       route: 'FocusTimer'
     },
     { 
       id: '3', 
       title: 'Guided Meditation', 
       desc: '5-minute audio mindfulness decompression sanctuary', 
-      icon: <Headphones size={24} color="#0D9488" />, 
-      bgColor: '#F0FDFA',
+      image: require('../../assets/images/mediation.jpg'),
       route: 'MeditationScreen'
     },
     {
       id: '4',
       title: 'Reflective Journaling',
       desc: 'Ground your thoughts and process emotional patterns',
-      icon: <BookOpen size={24} color="#0D9488" />,
-      bgColor: '#F0FDFA',
+      image: require('../../assets/images/journaling.jpg'),
       route: 'JournalScreen'
     },
     {
       id: '5',
       title: 'A+ Track: Academic Resilience',
       desc: 'Stress-adapted study pacing & exam readiness',
-      icon: <GraduationCap size={24} color="#0D9488" />,
-      bgColor: '#F0FDFA',
+      image: require('../../assets/images/A+-track.jpg'),
       route: 'AplusTrackScreen'
     }
   ];
 
   const options = isCrunchMode ? [instantDecompressionOption, ...baseOptions] : baseOptions;
 
-  // Derive Box Breathing Phase & Instruction (16-second cycle: 4s Inhale, 4s Hold, 4s Exhale, 4s Hold)
-  const elapsedBox = TOTAL_BOX_BREATHING_SECONDS - boxSecondsLeft;
-  const cycleSec = elapsedBox % 16;
-  let boxPhaseName = 'Inhale';
-  let boxPhaseInstruction = 'Breathe in slowly through the nose';
-  let boxPhaseCountdown = 4 - (cycleSec % 4);
-
-  if (cycleSec < 4) {
-    boxPhaseName = 'Inhale';
-    boxPhaseInstruction = 'Breathe in slowly through the nose (4s)';
-  } else if (cycleSec < 8) {
-    boxPhaseName = 'Hold';
-    boxPhaseInstruction = 'Sustain breath calmly without strain (4s)';
-  } else if (cycleSec < 12) {
-    boxPhaseName = 'Exhale';
-    boxPhaseInstruction = 'Slowly empty lungs through the mouth (4s)';
-  } else {
-    boxPhaseName = 'Hold';
-    boxPhaseInstruction = 'Rest quietly before the next cycle (4s)';
-  }
-
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.title}>Stress Relief & Coping</Text>
-          <Text style={styles.subtitle}>Evidence-based relaxation protocols to regulate your nervous system</Text>
-        </View>
+    <View style={styles.container}>
+      {/* Ambient Translucent Mint-Teal and Soft Sky-Blue Circles (Identical to HomeScreen.js) */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
 
-        {/* Discreet Clinical Exam Crunch Mode Banner */}
-        {isCrunchMode && (
-          <View style={styles.crunchModeBanner}>
-            <Clock size={15} color="#0D9488" style={{ marginRight: 8 }} />
-            <Text style={styles.crunchModeBannerText}>
-              Exam Mode Active: Micro-breaks prioritized to reduce cognitive fatigue.
+      <SafeAreaView style={styles.safeArea}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          {/* Top Header (Compact & Tightened) */}
+          <View style={styles.header}>
+            <Text style={styles.title}>Mindful Calm & Coping</Text>
+            <Text style={styles.subtitle}>
+              Evidence-based relaxation tools to restore mental balance
             </Text>
           </View>
-        )}
 
-        {/* Relaxation Protocols List */}
-        <View style={styles.listContainer}>
-          {options.map((item) => (
-            <TouchableOpacity 
-              key={item.id} 
-              style={styles.card}
-              onPress={() => {
-                if (item.action) {
-                  item.action();
-                } else if (item.route) {
-                  navigation.navigate(item.route);
-                }
-              }}
-              activeOpacity={0.8}
+          {/* Hero Banner: Full-Bleed 185px Auto-Slide with Dynamic Thematic Copy */}
+          <View style={styles.heroBannerCard}>
+            <ImageBackground 
+              source={activeSlide.image}
+              style={styles.heroBannerBackground}
+              imageStyle={styles.heroBannerImage}
+              resizeMode="cover"
             >
-              <View style={[styles.iconBg, { backgroundColor: item.bgColor }]}>
-                {item.icon}
-              </View>
-              <View style={styles.textContent}>
-                <Text style={styles.cardTitle}>{item.title}</Text>
-                <Text style={styles.cardDesc} numberOfLines={2}>
-                  {item.desc}
-                </Text>
-              </View>
+              <View style={styles.heroBannerScrim}>
+                <View style={styles.heroBannerBottomRow}>
+                  <View style={styles.heroBannerTextCol}>
+                    <View style={styles.heroBadge}>
+                      <Text style={styles.heroBadgeText}>{activeSlide.tag}</Text>
+                    </View>
+                    <Text style={styles.heroMotivationalText}>
+                      {activeSlide.title}
+                    </Text>
+                  </View>
 
-              <View style={styles.playBtnWrap}>
-                <ChevronRight size={22} color="#0D9488" />
+                  {/* Subtle Auto-Slide Pagination Dots */}
+                  <View style={styles.paginationDotsWrap}>
+                    {BANNER_SLIDES.map((_, idx) => (
+                      <View 
+                        key={idx} 
+                        style={[
+                          styles.paginationDot, 
+                          idx === activeBannerIndex && styles.paginationDotActive
+                        ]} 
+                      />
+                    ))}
+                  </View>
+                </View>
               </View>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Clinical Daily Tip Card */}
-        <View style={styles.tipCard}>
-          <View style={styles.tipHeader}>
-            <View style={styles.tipIconCircle}>
-              <Lightbulb size={16} color="#0D9488" />
-            </View>
-            <Text style={styles.tipTitle}>Clinical Daily Tip</Text>
+            </ImageBackground>
           </View>
-          {loadingTip ? (
-            <ActivityIndicator color="#0D9488" size="small" style={{ alignSelf: 'flex-start', marginTop: 8 }} />
-          ) : (
-            <Text style={styles.tipText}>{dailyTip}</Text>
+
+          {/* Discreet Clinical Exam Crunch Mode Banner */}
+          {isCrunchMode && (
+            <View style={styles.crunchModeBanner}>
+              <Clock size={15} color="#0D9488" style={{ marginRight: 8 }} />
+              <Text style={styles.crunchModeBannerText}>
+                Exam Mode Active: Micro-breaks prioritized to reduce cognitive fatigue.
+              </Text>
+            </View>
           )}
-        </View>
-      </ScrollView>
 
-      {/* Dedicated 2-Minute Pre-Exam Box Breathing Modal */}
-      <Modal
-        visible={isBoxBreathingModalVisible}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={handleCloseBoxBreathing}
-      >
-        <View style={styles.boxModalOverlay}>
-          <View style={styles.boxModalContainer}>
-            {/* Modal Header */}
-            <View style={styles.boxModalHeader}>
-              <View>
-                <Text style={styles.boxModalTitle}>Pre-Exam Grounding</Text>
-                <Text style={styles.boxModalSubtitle}>2-Minute Box Breathing Protocol</Text>
-              </View>
+          {/* Relaxation Protocols List */}
+          <View style={styles.listContainer}>
+            {options.map((item) => (
               <TouchableOpacity 
-                onPress={handleCloseBoxBreathing}
-                style={styles.modalCloseBtn}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <X size={20} color="#64748B" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Visual Pulse Circle */}
-            <View style={styles.boxPulseArea}>
-              <Animated.View 
-                style={[
-                  styles.boxPulseRing, 
-                  {
-                    transform: [{ scale: boxPulseAnim }],
-                    opacity: boxPulseOpacity,
+                key={item.id} 
+                style={styles.card}
+                onPress={() => {
+                  if (item.action) {
+                    item.action();
+                  } else if (item.route) {
+                    navigation.navigate(item.route);
                   }
-                ]} 
-              />
-              <View style={styles.boxCenterCircle}>
-                <Text style={styles.boxPhaseText}>{boxPhaseName}</Text>
-                <Text style={styles.boxPhaseCount}>{boxPhaseCountdown}s</Text>
-              </View>
-            </View>
-
-            {/* Phase Guidance & Minimalist Timer Countdown */}
-            <View style={styles.boxInstructionWrap}>
-              <Text style={styles.boxPhaseInstruction}>{boxPhaseInstruction}</Text>
-              <View style={styles.boxCountdownRow}>
-                <Clock size={15} color="#0D9488" />
-                <Text style={styles.boxCountdownText}>
-                  {formatTime(boxSecondsLeft)} remaining
-                </Text>
-              </View>
-            </View>
-
-            {/* Synchronized Modal Actions: Finish Session & Close */}
-            <View style={styles.boxActionsRow}>
-              <TouchableOpacity 
-                style={styles.boxFinishBtn}
-                onPress={handleCompleteBoxBreathing}
-                activeOpacity={0.85}
+                }}
+                activeOpacity={0.82}
               >
-                <Text style={styles.boxFinishBtnText}>Finish Session</Text>
+                <Image 
+                  source={item.image} 
+                  style={styles.cardThumbnail} 
+                  resizeMode="cover"
+                />
+                <View style={styles.textContent}>
+                  <Text style={styles.cardTitle}>{item.title}</Text>
+                  <Text style={styles.cardDesc} numberOfLines={2}>
+                    {item.desc}
+                  </Text>
+                </View>
+
+                <View style={styles.chevronBtnWrap}>
+                  <ChevronRight size={18} color="#0D9488" strokeWidth={2.5} />
+                </View>
               </TouchableOpacity>
-              <TouchableOpacity 
-                style={styles.boxCloseBtn}
-                onPress={handleCloseBoxBreathing}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.boxCloseBtnText}>Close</Text>
-              </TouchableOpacity>
-            </View>
+            ))}
           </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
+
+          {/* Clinical Daily Tip Card */}
+          <View style={styles.tipCard}>
+            <View style={styles.tipHeader}>
+              <View style={styles.tipHeaderLeft}>
+                <View style={styles.tipIconCircle}>
+                  <Lightbulb size={16} color="#0D9488" />
+                </View>
+                <Text style={styles.tipTitle}>Clinical Daily Tip</Text>
+                <View style={styles.microActionBadge}>
+                  <Text style={styles.microActionBadgeText}>Today's Micro-Action</Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.tipRefreshBtn}
+                onPress={() => fetchUserDataAndTip()}
+                disabled={loadingTip}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                activeOpacity={0.7}
+                accessibilityLabel="Generate New Micro-Action Tip"
+              >
+                {loadingTip ? (
+                  <ActivityIndicator size="small" color="#0D9488" />
+                ) : (
+                  <RefreshCw size={14} color="#0D9488" />
+                )}
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.tipText}>{dailyTip}</Text>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
-  scrollContent: { padding: 22, paddingBottom: 100 },
-  header: { marginBottom: 24 },
-  title: { fontSize: 25, fontWeight: '800', color: '#1E293B' },
-  subtitle: { fontSize: 14, color: '#64748B', marginTop: 6, lineHeight: 20 },
-  listContainer: { gap: 14 },
-  card: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    backgroundColor: '#FFFFFF', 
-    padding: 16, 
-    borderRadius: 20, 
-    borderWidth: 1, 
-    borderColor: '#E2E8F0', 
-    elevation: 1,
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6
+  container: { 
+    flex: 1, 
+    backgroundColor: '#EDF5F4' 
   },
-  cardActive: {
-    borderColor: '#0D9488',
-    backgroundColor: '#F0FDFA',
+  safeArea: { 
+    flex: 1 
   },
-  iconBg: { 
-    width: 48, 
-    height: 48, 
-    borderRadius: 14, 
-    justifyContent: 'center', 
-    alignItems: 'center', 
-    marginRight: 14,
-    borderWidth: 1,
-    borderColor: '#CCFBF1'
+  scrollContent: { 
+    paddingHorizontal: 20, 
+    paddingTop: 12, 
+    paddingBottom: 110 
   },
-  textContent: { flex: 1 },
-  cardTitle: { fontSize: 16, fontWeight: '700', color: '#1E293B' },
-  cardDesc: { fontSize: 13, color: '#64748B', marginTop: 3, lineHeight: 18 },
-  cardDescActive: { color: '#0D9488', fontWeight: '600' },
-  playBtnWrap: {
-    padding: 6
+
+  // Ambient Translucent Mint-Teal & Soft Sky-Blue Circles (Matching HomeScreen.js)
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(45, 212, 191, 0.24)',
   },
-  journalModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.65)',
-    justifyContent: 'flex-end',
+  ambientOrbMiddle: {
+    position: 'absolute',
+    top: 360,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.20)',
   },
-  journalModalContainer: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    paddingHorizontal: 22,
-    paddingTop: 22,
-    paddingBottom: 36,
-    maxHeight: '85%',
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 16,
-    elevation: 10,
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: 100,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(56, 189, 248, 0.18)',
   },
-  journalModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-    width: '100%',
-  },
-  journalModalTitleGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  journalModalTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#0F766E',
-  },
-  journalModalSubtitle: {
-    fontSize: 12,
-    color: '#64748B',
-    marginTop: 2,
-  },
-  journalModalGuidance: {
-    fontSize: 13,
-    color: '#475569',
-    lineHeight: 19,
+
+  // Header (Compact & Tightened)
+  header: { 
+    marginTop: 0,
     marginBottom: 14,
   },
-  journalIconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#E6F4F1',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-    borderWidth: 1,
-    borderColor: '#CCFBF1'
+  title: { 
+    fontSize: 24, 
+    fontWeight: '800', 
+    color: '#0F172A',
+    letterSpacing: -0.4,
   },
-  journalInput: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 16,
+  subtitle: { 
+    fontSize: 13, 
+    color: '#64748B', 
+    marginTop: 4, 
+    lineHeight: 19 
+  },
+
+  // Hero Banner: Full-Bleed 185px Auto-Slide Card
+  heroBannerCard: {
+    width: '100%',
+    height: 185,
+    borderRadius: 22,
+    overflow: 'hidden',
     borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    padding: 14,
-    fontSize: 15,
-    color: '#1E293B',
-    minHeight: 120,
-    textAlignVertical: 'top',
-    lineHeight: 22
+    borderColor: '#FFFFFF',
+    marginBottom: 16,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.10,
+    shadowRadius: 10,
+    elevation: 3,
   },
-  journalSubmitBtn: {
-    backgroundColor: '#0D9488',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderRadius: 16,
-    marginTop: 14,
-    gap: 8,
-    elevation: 2
+  heroBannerBackground: {
+    width: '100%',
+    height: 185,
+    justifyContent: 'flex-end',
   },
-  journalSubmitBtnDisabled: {
-    backgroundColor: '#94A3B8'
+  heroBannerImage: {
+    borderRadius: 22,
   },
-  journalSubmitText: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '700'
-  },
-  reflectionCard: {
-    backgroundColor: '#F0FDFA',
-    borderRadius: 18,
-    borderWidth: 1.5,
-    borderColor: '#CCFBF1',
-    padding: 16,
-    marginTop: 16
-  },
-  reflectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-    gap: 6
-  },
-  reflectionTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#0F766E'
-  },
-  reflectionBadgesRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 10
-  },
-  reflectionEmotionBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#E6F4F1',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    gap: 4
-  },
-  reflectionEmotionText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#0F766E'
-  },
-  reflectionTriggerBadge: {
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#CCFBF1'
-  },
-  reflectionTriggerText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#0D9488'
-  },
-  reflectionSentimentBadge: {
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E2E8F0'
-  },
-  reflectionSentimentText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#64748B'
-  },
-  reflectionBody: {
-    fontSize: 14,
-    color: '#134E4A',
-    lineHeight: 21,
-    fontStyle: 'italic',
-    marginBottom: 12
-  },
-  resetReflectionBtn: {
-    alignSelf: 'flex-start',
-    paddingVertical: 4
-  },
-  resetReflectionText: {
-    color: '#0D9488',
-    fontSize: 12,
-    fontWeight: '700',
-    textDecorationLine: 'underline'
-  },
-  viewFullJournalBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+  heroBannerScrim: {
+    backgroundColor: 'rgba(15, 23, 42, 0.28)',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 14,
     paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    gap: 8,
-    marginTop: 18,
+    width: '100%',
+    borderBottomLeftRadius: 22,
+    borderBottomRightRadius: 22,
   },
-  viewFullJournalText: {
-    fontSize: 13,
+  heroBannerBottomRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+  heroBannerTextCol: {
+    flex: 1,
+    paddingRight: 10,
+  },
+  heroBadge: {
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  heroBadgeText: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    color: '#CCFBF1',
+    letterSpacing: 1.2,
+  },
+  heroMotivationalText: {
+    fontSize: 14.5,
     fontWeight: '700',
-    color: '#0D9488',
+    color: '#FFFFFF',
+    lineHeight: 19,
+    textShadowColor: 'rgba(0, 0, 0, 0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
-  tipCard: { 
-    backgroundColor: '#F0FDFA', 
-    padding: 20, 
-    borderRadius: 22, 
-    marginTop: 22,
+  paginationDotsWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.28)',
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    borderRadius: 10,
+    marginBottom: 2,
+  },
+  paginationDot: {
+    width: 5.5,
+    height: 5.5,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255, 255, 255, 0.45)',
+    marginHorizontal: 2.5,
+  },
+  paginationDotActive: {
+    width: 14,
+    height: 5.5,
+    borderRadius: 3,
+    backgroundColor: '#2DD4BF',
+  },
+
+  // Crunch Mode Banner
+  crunchModeBanner: {
+    backgroundColor: 'rgba(240, 253, 250, 0.92)',
     borderWidth: 1.5,
-    borderColor: '#CCFBF1'
+    borderColor: '#99F6E4',
+    borderRadius: 18,
+    padding: 12,
+    marginBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#0D9488',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  tipHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  crunchModeBannerText: {
+    fontSize: 12.5,
+    color: '#0D9488',
+    fontWeight: '600',
+    flex: 1,
+    lineHeight: 17,
+  },
+
+  // Relaxation Protocols List & Frosted White Glass Cards
+  listContainer: { 
+    marginBottom: 16 
+  },
+  card: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 14,
+    marginBottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  cardThumbnail: {
+    width: 64,
+    height: 64,
+    borderRadius: 18,
+    marginRight: 14,
+  },
+  textContent: { 
+    flex: 1,
+    marginRight: 10,
+  },
+  cardTitle: { 
+    fontSize: 16, 
+    fontWeight: '700', 
+    color: '#0F172A', 
+    marginBottom: 3 
+  },
+  cardDesc: { 
+    fontSize: 12.5, 
+    color: '#64748B', 
+    lineHeight: 17 
+  },
+  chevronBtnWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(13, 148, 136, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // Frosted White Glass Daily Tip Card
+  tipCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 16,
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 2,
+    marginBottom: 24,
+  },
+  tipHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  tipHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    flex: 1,
+  },
   tipIconCircle: {
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: '#FFFFFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: '#CCFBF1'
-  },
-  tipTitle: { color: '#0F766E', fontWeight: '800', fontSize: 14, letterSpacing: 0.4 },
-  tipText: { color: '#134E4A', fontSize: 14, lineHeight: 22, fontWeight: '500' },
-
-  // Modal Player Styles
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.65)',
-    justifyContent: 'flex-end',
-  },
-  modalContainer: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 36,
-    alignItems: 'center',
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 16,
-    elevation: 10,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    width: '100%',
-    marginBottom: 16,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#0F766E',
-  },
-  modalSubtitle: {
-    fontSize: 13,
-    color: '#64748B',
-    marginTop: 2,
-  },
-  modalCloseBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#F1F5F9',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  pulseArea: {
-    width: 170,
-    height: 170,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginVertical: 10,
-  },
-  pulseOuterRing: {
-    position: 'absolute',
-    width: 160,
-    height: 160,
-    borderRadius: 80,
-    backgroundColor: '#CCFBF1',
-  },
-  pulseMiddleRing: {
-    position: 'absolute',
-    width: 116,
-    height: 116,
-    borderRadius: 58,
-    backgroundColor: '#E6F4F1',
-  },
-  pulseCoreCircle: {
-    width: 78,
-    height: 78,
-    borderRadius: 39,
-    backgroundColor: '#0D9488',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 4,
-    shadowColor: '#0D9488',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-  },
-  timerDisplayWrap: {
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  timerCountdownText: {
-    fontSize: 42,
-    fontWeight: '800',
-    color: '#1E293B',
-    letterSpacing: 1.5,
-  },
-  timerStatusSub: {
-    fontSize: 13,
-    color: '#0D9488',
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  modalProgressBarWrap: {
-    width: '100%',
-    marginTop: 20,
-  },
-  modalProgressBarTrack: {
-    height: 6,
-    backgroundColor: '#E2E8F0',
-    borderRadius: 3,
-    overflow: 'hidden',
-    width: '100%',
-  },
-  modalProgressBarFill: {
-    height: '100%',
-    backgroundColor: '#0D9488',
-    borderRadius: 3,
-  },
-  modalProgressTimeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 6,
-  },
-  modalProgressTimeText: {
-    fontSize: 12,
-    color: '#64748B',
-    fontWeight: '600',
-  },
-  audioBadgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
     backgroundColor: '#F0FDFA',
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    marginTop: 14,
-  },
-  audioBadgeText: {
-    fontSize: 12,
-    color: '#0F766E',
-    fontWeight: '600',
-  },
-  modalControlsRow: {
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 28,
-    marginTop: 22,
-    width: '100%',
+    marginRight: 2,
   },
-  modalSecondaryBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalPlayPauseBtn: {
-    width: 66,
-    height: 66,
-    borderRadius: 33,
-    backgroundColor: '#0D9488',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 4,
-    shadowColor: '#0D9488',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-  modalStopBtn: {
-    width: '100%',
-    paddingVertical: 13,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    alignItems: 'center',
-    marginTop: 20,
-    backgroundColor: '#F8FAFC',
-  },
-  modalStopBtnText: {
-    color: '#64748B',
+  tipTitle: {
     fontSize: 14,
     fontWeight: '700',
-  },
-
-  // A+ Track: Academic Resilience Styles
-  academicTrackCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 18,
-    marginBottom: 20,
-    borderWidth: 1.5,
-    borderColor: '#CCFBF1',
-    shadowColor: '#0D9488',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 3,
-  },
-  academicHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  academicTitleGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 10,
-  },
-  academicIconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  academicCardTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#0F766E',
-    letterSpacing: -0.2,
-  },
-  academicCardSubtitle: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#64748B',
-    marginTop: 1,
-  },
-  academicStatusBadge: {
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  academicStatusBadgeText: {
-    color: '#0D9488',
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  pacingRhythmBox: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderLeftWidth: 4,
-    borderLeftColor: '#0D9488',
-    padding: 14,
-    marginBottom: 14,
-  },
-  pacingRhythmHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 4,
-  },
-  pacingRhythmLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#0D9488',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-  },
-  pacingRhythmMain: {
-    fontSize: 15,
-    fontWeight: '800',
     color: '#0F172A',
-    marginBottom: 4,
   },
-  pacingGuidanceText: {
-    fontSize: 12,
-    color: '#475569',
-    lineHeight: 18,
-  },
-  pacingIntervalsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 16,
-  },
-  pacingIntervalPill: {
-    flex: 1,
+  microActionBadge: {
     backgroundColor: '#F0FDFA',
-    borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: '#CCFBF1',
-    alignItems: 'center',
+    borderColor: '#99F6E4',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
   },
-  pacingIntervalBreak: {
-    backgroundColor: '#F8FAFC',
-    borderColor: '#E2E8F0',
-  },
-  intervalNum: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#0D9488',
-  },
-  intervalNumBreak: {
-    color: '#475569',
-  },
-  intervalLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#64748B',
-    marginTop: 2,
-  },
-  preExamBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#0D9488',
-    paddingVertical: 14,
-    borderRadius: 14,
-    elevation: 3,
-    shadowColor: '#0D9488',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-  },
-  preExamBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
+  microActionBadgeText: {
+    fontSize: 10.5,
     fontWeight: '700',
+    color: '#0D9488',
     letterSpacing: 0.2,
   },
-
-  // Box Breathing Modal Styles
-  boxModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.75)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  boxModalContainer: {
-    width: '100%',
-    maxWidth: 380,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    padding: 24,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-    elevation: 10,
-  },
-  boxModalHeader: {
-    width: '100%',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
-  boxModalTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#0F172A',
-  },
-  boxModalSubtitle: {
-    fontSize: 12,
-    color: '#64748B',
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  boxPulseArea: {
-    width: 220,
-    height: 220,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginVertical: 12,
-  },
-  boxPulseRing: {
-    position: 'absolute',
-    width: 170,
-    height: 170,
-    borderRadius: 85,
-    backgroundColor: '#CCFBF1',
-    borderWidth: 2,
-    borderColor: '#0D9488',
-  },
-  boxCenterCircle: {
-    width: 124,
-    height: 124,
-    borderRadius: 62,
-    backgroundColor: '#0D9488',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 6,
-    shadowColor: '#0D9488',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-  },
-  boxPhaseText: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  boxPhaseCount: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#CCFBF1',
-    marginTop: 4,
-  },
-  boxInstructionWrap: {
-    width: '100%',
-    alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 20,
-  },
-  boxPhaseInstruction: {
-    fontSize: 13.5,
-    fontWeight: '600',
-    color: '#334155',
-    textAlign: 'center',
-    marginBottom: 10,
-  },
-  boxCountdownRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#F0FDFA',
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 12,
+  tipRefreshBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F8FAFC',
     borderWidth: 1,
-    borderColor: '#CCFBF1',
-  },
-  boxCountdownText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#0F766E',
-  },
-  boxActionsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    width: '100%',
-  },
-  boxFinishBtn: {
-    flex: 1,
-    paddingVertical: 13,
-    borderRadius: 12,
-    backgroundColor: '#0D9488',
+    borderColor: '#E2E8F0',
     alignItems: 'center',
     justifyContent: 'center',
+    marginLeft: 6,
   },
-  boxFinishBtnText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  boxCloseBtn: {
-    paddingVertical: 13,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  boxCloseBtnText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#64748B',
-  },
-  viewRoadToAplusBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    gap: 8,
-    marginTop: 10,
-  },
-  viewRoadToAplusText: {
-    fontSize: 13.5,
-    fontWeight: '700',
-    color: '#0D9488',
-  },
-  // Exam Crunch Mode Banner
-  crunchModeBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    marginBottom: 16,
-  },
-  crunchModeBannerText: {
-    color: '#0F766E',
-    fontSize: 12.5,
-    fontWeight: '700',
-    flex: 1,
+  tipText: { 
+    fontSize: 13, 
+    color: '#475569', 
+    lineHeight: 20 
   },
 });
 
