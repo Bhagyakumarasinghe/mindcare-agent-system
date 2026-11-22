@@ -27,6 +27,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getUserProfile, getUserAnalytics } from '../api/authService';
+import { computeWeeklyStressTrend } from '../utils/activityTracker';
 
 const { width } = Dimensions.get('window');
 const BANNER_WIDTH = width - 40; // 20px padding on each side
@@ -165,24 +166,26 @@ export default function HomeScreen({ navigation }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [latestBiometrics, setLatestBiometrics] = useState(null);
+  const [userId, setUserId] = useState('');
 
-  // Auto-show Quick Start Guide Modal on first visit
-  useEffect(() => {
-    const checkGuideStatus = async () => {
-      try {
-        const seen = await AsyncStorage.getItem('@mindcare_seen_home_guide');
-        if (seen !== 'true') {
-          setShowGuideModal(true);
-        }
-      } catch (e) {
-        // ignore
+  // Auto-show Quick Start Guide Modal on first visit strictly scoped to this user
+  const checkGuideStatus = useCallback(async (uid) => {
+    if (!uid) return;
+    try {
+      const seen = await AsyncStorage.getItem('@mindcare_onboarding_seen_' + uid);
+      if (seen !== 'true') {
+        setShowGuideModal(true);
       }
-    };
-    checkGuideStatus();
+    } catch (e) {
+      // ignore
+    }
   }, []);
 
   const handleDismissGuide = async (navigateTo = null) => {
     try {
+      if (userId) {
+        await AsyncStorage.setItem('@mindcare_onboarding_seen_' + userId, 'true');
+      }
       await AsyncStorage.setItem('@mindcare_seen_home_guide', 'true');
     } catch (e) {
       console.warn('Error saving guide status:', e);
@@ -253,18 +256,25 @@ export default function HomeScreen({ navigation }) {
     try {
       const response = await getUserProfile();
       if (response && response.status === 200) {
-        const fullName = response.data.full_name || response.data.name;
+        const uData = response.data;
+        const fullName = uData.full_name || uData.name;
         const firstName = fullName ? fullName.trim().split(' ')[0] : 'User';
         setUserName(firstName);
+
+        const resolvedId = uData.id || uData.user_id || '';
+        if (resolvedId) {
+          setUserId(resolvedId);
+          checkGuideStatus(resolvedId);
+        }
 
         // Keep local profile cache in sync
         await AsyncStorage.setItem(
           '@mindcare_cached_profile',
           JSON.stringify({
-            id: response.data.id || response.data.user_id || '',
+            id: resolvedId,
             name: fullName || '',
             full_name: fullName || '',
-            email: response.data.email || '',
+            email: uData.email || '',
           })
         );
       }
@@ -275,7 +285,7 @@ export default function HomeScreen({ navigation }) {
         console.warn('User Profile fetch notice on Home:', error.message || error);
       }
     }
-  }, []);
+  }, [checkGuideStatus]);
 
   const fetchAnalyticsData = useCallback(async () => {
     try {
@@ -295,14 +305,20 @@ export default function HomeScreen({ navigation }) {
     }
   }, []);
 
-  // Refresh data automatically on screen focus & sync exam crunch mode & cached assessment & biometrics
+  // Refresh data automatically on screen focus & sync exam crunch mode & strictly scoped assessment & biometrics
   useFocusEffect(
     useCallback(() => {
+      let uid = '';
       const syncCachedProfile = async () => {
         try {
           const cached = await AsyncStorage.getItem('@mindcare_cached_profile');
           if (cached) {
             const parsed = JSON.parse(cached);
+            uid = parsed.id || parsed.user_id || '';
+            if (uid) {
+              setUserId(uid);
+              checkGuideStatus(uid);
+            }
             const nameToUse = parsed.full_name || parsed.name;
             if (nameToUse) {
               setUserName(nameToUse.trim().split(' ')[0]);
@@ -312,6 +328,7 @@ export default function HomeScreen({ navigation }) {
           // ignore
         }
       };
+
       const syncCrunchMode = async () => {
         try {
           const val = await AsyncStorage.getItem('mindcare_exam_crunch_mode');
@@ -320,44 +337,43 @@ export default function HomeScreen({ navigation }) {
           // ignore
         }
       };
-      const loadCachedAssessment = async () => {
+
+      const loadCachedAssessment = async (targetUid) => {
         try {
-          const cached = await AsyncStorage.getItem('mindcare_latest_assessment');
-          if (cached) {
-            setLatestLocalAssessment(JSON.parse(cached));
+          const idToUse = targetUid || uid;
+          if (idToUse) {
+            const cached = await AsyncStorage.getItem(`mindcare_latest_assessment_${idToUse}`);
+            setLatestLocalAssessment(cached ? JSON.parse(cached) : null);
+          } else {
+            setLatestLocalAssessment(null);
           }
         } catch (e) {
-          // ignore
-        }
-      };
-      const syncBiometricsCache = async () => {
-        try {
-          const cachedProfile = await AsyncStorage.getItem('@mindcare_cached_profile');
-          let uid = '';
-          if (cachedProfile) {
-            const parsed = JSON.parse(cachedProfile);
-            uid = parsed.id || parsed.user_id || '';
-          }
-          const [scoped, fallback] = await Promise.all([
-            uid ? AsyncStorage.getItem(`@mindcare_latest_biometrics_${uid}`) : null,
-            AsyncStorage.getItem('@mindcare_latest_biometrics'),
-          ]);
-          const raw = scoped || fallback;
-          if (raw) {
-            setLatestBiometrics(JSON.parse(raw));
-          }
-        } catch (e) {
-          // ignore
+          setLatestLocalAssessment(null);
         }
       };
 
-      syncCachedProfile();
-      syncCrunchMode();
-      loadCachedAssessment();
-      syncBiometricsCache();
-      fetchUserData();
-      fetchAnalyticsData();
-    }, [fetchUserData, fetchAnalyticsData])
+      const syncBiometricsCache = async (targetUid) => {
+        try {
+          const idToUse = targetUid || uid;
+          if (idToUse) {
+            const scoped = await AsyncStorage.getItem(`@mindcare_latest_biometrics_${idToUse}`);
+            setLatestBiometrics(scoped ? JSON.parse(scoped) : null);
+          } else {
+            setLatestBiometrics(null);
+          }
+        } catch (e) {
+          setLatestBiometrics(null);
+        }
+      };
+
+      syncCachedProfile().then(() => {
+        syncCrunchMode();
+        loadCachedAssessment(uid);
+        syncBiometricsCache(uid);
+        fetchUserData();
+        fetchAnalyticsData();
+      });
+    }, [fetchUserData, fetchAnalyticsData, checkGuideStatus])
   );
 
   const toggleCrunchMode = async () => {
@@ -370,116 +386,90 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  // Clinical assessments and daily mood check-ins compute weekly stress trend
+  // Clinical assessments and daily mood check-ins compute weekly stress trend (Synchronized with AnalyticsScreen)
   const getDynamicTrend = () => {
-    const weeklyMap = [
-      { day: 'Mon', val: 0, count: 0 },
-      { day: 'Tue', val: 0, count: 0 },
-      { day: 'Wed', val: 0, count: 0 },
-      { day: 'Thu', val: 0, count: 0 },
-      { day: 'Fri', val: 0, count: 0 },
-      { day: 'Sat', val: 0, count: 0 },
-      { day: 'Sun', val: 0, count: 0 },
-    ];
-
-    // 1. Process assessment history
-    if (analytics?.history && analytics.history.length > 0) {
-      analytics.history.forEach((entry) => {
-        if (entry.date && entry.score !== undefined) {
-          const cleanDate = entry.date.split('.')[0].replace('Z', '');
-          const dateObj = new Date(cleanDate);
-          if (!isNaN(dateObj.getTime())) {
-            let dayIdx = dateObj.getDay();
-            let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-            const safeScore = entry.score > 10 ? 10 : entry.score;
-            weeklyMap[adjustedIdx].val += safeScore;
-            weeklyMap[adjustedIdx].count += 1;
-          }
-        }
-      });
-    }
-
-    // 2. Process recent mood logs from backend analytics
-    if (analytics?.recent_mood_logs && analytics.recent_mood_logs.length > 0) {
-      analytics.recent_mood_logs.forEach((log) => {
-        const logDateStr = log.date || log.timestamp;
-        const logScore = log.stress_score !== undefined && log.stress_score !== null
-          ? Number(log.stress_score)
-          : (log.mood === 'Great' ? 2 : log.mood === 'Good' ? 3.5 : log.mood === 'Okay' ? 5 : log.mood === 'Bad' ? 7.5 : log.mood === 'Terrible' ? 9 : null);
-        if (logDateStr && logScore !== null && !isNaN(logScore)) {
-          const cleanDate = String(logDateStr).split('.')[0].replace('Z', '');
-          const dateObj = new Date(cleanDate);
-          if (!isNaN(dateObj.getTime())) {
-            let dayIdx = dateObj.getDay();
-            let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-            weeklyMap[adjustedIdx].val += Math.min(10, Math.max(1, logScore));
-            weeklyMap[adjustedIdx].count += 1;
-          }
-        }
-      });
-    }
-
-    // 3. Immediately reflect instant local biometrics cache for today
-    const bioStress = latestBiometrics?.stress_score ?? latestBiometrics?.stress_level;
-    if (latestBiometrics && bioStress !== undefined && bioStress !== null) {
-      const rawDate = latestBiometrics.timestamp || latestBiometrics.date || new Date().toISOString();
-      const bioDate = new Date(rawDate);
-      if (!isNaN(bioDate.getTime())) {
-        let dayIdx = bioDate.getDay();
-        let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-        const bioScore = Math.min(10, Math.max(1, Number(bioStress)));
-        weeklyMap[adjustedIdx].val += bioScore;
-        weeklyMap[adjustedIdx].count += 1;
-      }
-    }
-
-    const hasData = weeklyMap.some((item) => item.count > 0);
-    if (!hasData) {
-      return weeklyMap.map((d) => ({ day: d.day, val: 8 }));
-    }
-
-    return weeklyMap.map((item) => {
-      const avgScoreForDay = item.count > 0 ? item.val / item.count : 0;
-      return {
-        day: item.day,
-        val: avgScoreForDay > 0 ? avgScoreForDay * 12 : 8,
-      };
-    });
+    return computeWeeklyStressTrend(
+      analytics?.history,
+      analytics?.recent_mood_logs,
+      latestBiometrics
+    );
   };
 
   const getStressCategory = (score, level, analyticsData) => {
-    const hasData = Boolean(
-      (analyticsData?.total_assessments && analyticsData.total_assessments > 0) ||
-      (analyticsData?.recent_mood_logs && analyticsData.recent_mood_logs.length > 0) ||
-      (score !== undefined && score !== null && !isNaN(Number(score))) ||
-      (level !== undefined && level !== null)
-    );
+    const rawVal = score !== null && score !== undefined && !isNaN(Number(score))
+      ? Number(score)
+      : analyticsData?.avg_stress !== undefined && analyticsData?.avg_stress !== null && !isNaN(Number(analyticsData.avg_stress))
+      ? Number(analyticsData.avg_stress)
+      : null;
 
-    if (!hasData || (score === null && level === null)) {
-      return {
-        tier: 'pending',
-        label: 'Pending',
-        title: 'Pending Evaluation',
-        subText: 'Complete daily check-ins to personalize your clinical profile',
-        accentColor: '#64748B',
-        dotColor: '#94A3B8',
-        bgColor: '#F1F5F9',
-        borderColor: '#E2E8F0',
-      };
+    if (rawVal === null || rawVal === 0) {
+      if (!level) {
+        return {
+          tier: 'pending',
+          label: 'Pending',
+          title: 'Pending Evaluation',
+          subText: 'Complete daily check-ins to personalize your clinical profile',
+          accentColor: '#64748B',
+          dotColor: '#94A3B8',
+          bgColor: '#F1F5F9',
+          borderColor: '#E2E8F0',
+        };
+      }
     }
 
-    const formattedScore = score !== null && score !== undefined && !isNaN(Number(score))
-      ? `${Number(score).toFixed(1)}/10`
+    const formattedScore = rawVal !== null && !isNaN(rawVal)
+      ? `${rawVal.toFixed(1)}/10`
       : 'Pending';
 
-    // 1. If explicit clinical stress level is provided from latest assessment, honor it directly
-    if (typeof level === 'string' && level.trim().length > 0) {
-      const s = level.toLowerCase().trim();
-      if (s === 'high' || s.includes('severe') || s.includes('alert') || s.includes('elevated')) {
+    // Standard clinical stress scale across MindCare:
+    // 0.0 - 3.9: Calm (Teal #0D9488)
+    // 4.0 - 6.4: Moderate (Amber #D97706)
+    // 6.5 - 10.0: High Alert (Red #DC2626)
+    if (rawVal !== null && !isNaN(rawVal)) {
+      if (rawVal >= 6.5) {
         return {
           tier: 'high',
           label: 'High Alert',
-          title: 'Current State: Elevated Tension',
+          title: 'Current State: High Alert',
+          subText: `Latest Assessment: ${formattedScore}`,
+          accentColor: '#B91C1C',
+          dotColor: '#DC2626',
+          bgColor: '#FEE2E2',
+          borderColor: '#FECACA',
+        };
+      }
+      if (rawVal >= 4.0) {
+        return {
+          tier: 'moderate',
+          label: 'Moderate',
+          title: 'Current State: Manageable Balance',
+          subText: `Latest Assessment: ${formattedScore}`,
+          accentColor: '#B45309',
+          dotColor: '#D97706',
+          bgColor: '#FEF3C7',
+          borderColor: '#FDE68A',
+        };
+      }
+      return {
+        tier: 'low',
+        label: 'Calm',
+        title: 'Current State: Optimal Balance',
+        subText: `Latest Assessment: ${formattedScore}`,
+        accentColor: '#0F766E',
+        dotColor: '#0D9488',
+        bgColor: '#CCFBF1',
+        borderColor: '#99F6E4',
+      };
+    }
+
+    // Level-based classification fallback if numeric score is absent
+    if (typeof level === 'string' && level.trim().length > 0) {
+      const s = level.toLowerCase().trim();
+      if (s === 'high' || s.includes('severe') || s.includes('alert')) {
+        return {
+          tier: 'high',
+          label: 'High Alert',
+          title: 'Current State: High Alert',
           subText: `Latest Assessment: ${formattedScore}`,
           accentColor: '#B91C1C',
           dotColor: '#DC2626',
@@ -499,52 +489,11 @@ export default function HomeScreen({ navigation }) {
           borderColor: '#FDE68A',
         };
       }
-      if (s === 'low' || s.includes('opt') || s.includes('calm') || s.includes('good')) {
-        return {
-          tier: 'low',
-          label: 'Optimal',
-          title: 'Current State: Optimal Balance',
-          subText: `Latest Assessment: ${formattedScore}`,
-          accentColor: '#0F766E',
-          dotColor: '#0D9488',
-          bgColor: '#CCFBF1',
-          borderColor: '#99F6E4',
-        };
-      }
-    }
-
-    // 2. Score threshold fallback
-    const numScore = Number(score ?? analyticsData?.avg_stress);
-    if (!isNaN(numScore)) {
-      if (numScore >= 6.6) {
-        return {
-          tier: 'high',
-          label: 'High Alert',
-          title: 'Current State: Elevated Tension',
-          subText: `Latest Assessment: ${numScore.toFixed(1)}/10`,
-          accentColor: '#B91C1C',
-          dotColor: '#DC2626',
-          bgColor: '#FEE2E2',
-          borderColor: '#FECACA',
-        };
-      }
-      if (numScore >= 3.6) {
-        return {
-          tier: 'moderate',
-          label: 'Moderate',
-          title: 'Current State: Manageable Balance',
-          subText: `Latest Assessment: ${numScore.toFixed(1)}/10`,
-          accentColor: '#B45309',
-          dotColor: '#D97706',
-          bgColor: '#FEF3C7',
-          borderColor: '#FDE68A',
-        };
-      }
       return {
         tier: 'low',
-        label: 'Optimal',
+        label: 'Calm',
         title: 'Current State: Optimal Balance',
-        subText: `Latest Assessment: ${numScore.toFixed(1)}/10`,
+        subText: `Latest Assessment: ${formattedScore}`,
         accentColor: '#0F766E',
         dotColor: '#0D9488',
         bgColor: '#CCFBF1',
@@ -621,7 +570,9 @@ export default function HomeScreen({ navigation }) {
 
   const isScoreElevated =
     (currentScoreVal !== null && currentScoreVal >= 6.5) || stressCategory.tier === 'high';
-  const progressBarColor = isScoreElevated ? '#DC2626' : '#0D9488';
+  const isScoreModerate =
+    (currentScoreVal !== null && currentScoreVal >= 4.0) || stressCategory.tier === 'moderate';
+  const progressBarColor = isScoreElevated ? '#DC2626' : isScoreModerate ? '#D97706' : '#0D9488';
 
   // Sleep snapshot calculation from local cache, analytics or recent mood logs
   const rawSleep =
@@ -637,6 +588,107 @@ export default function HomeScreen({ navigation }) {
   const sleepStatus = hasSleepLog
     ? (isRested ? 'Rested' : 'Needs Rest')
     : (analytics || latestBiometrics ? 'No Logs' : 'Rested');
+
+  // Study pacing calculation: adapt dynamically based on latest assessment or mood check-in
+  const latestStress = (() => {
+    if (
+      latestAssessmentScore !== null &&
+      latestAssessmentScore !== undefined &&
+      !isNaN(Number(latestAssessmentScore)) &&
+      Number(latestAssessmentScore) > 0
+    ) {
+      return Number(latestAssessmentScore);
+    }
+    if (
+      latestBiometrics?.stress_score !== undefined &&
+      latestBiometrics?.stress_score !== null &&
+      !isNaN(Number(latestBiometrics.stress_score)) &&
+      Number(latestBiometrics.stress_score) > 0
+    ) {
+      return Number(latestBiometrics.stress_score);
+    }
+    if (
+      latestBiometrics?.stress_level !== undefined &&
+      latestBiometrics?.stress_level !== null &&
+      !isNaN(Number(latestBiometrics.stress_level)) &&
+      Number(latestBiometrics.stress_level) > 0
+    ) {
+      return Number(latestBiometrics.stress_level);
+    }
+    if (
+      analytics?.avg_stress !== undefined &&
+      analytics?.avg_stress !== null &&
+      !isNaN(Number(analytics?.avg_stress)) &&
+      Number(analytics.avg_stress) > 0
+    ) {
+      return Number(analytics.avg_stress);
+    }
+    if (analytics?.recent_mood_logs && analytics.recent_mood_logs.length > 0) {
+      const firstLog = analytics.recent_mood_logs[0];
+      const sVal = firstLog.stress_score ?? firstLog.stress_level;
+      if (sVal !== undefined && sVal !== null && !isNaN(Number(sVal)) && Number(sVal) > 0) {
+        return Number(sVal);
+      }
+    }
+    if (latestBiometrics?.mood) {
+      const moodMap = { Great: 2.0, Good: 3.5, Okay: 5.0, Bad: 7.5, Terrible: 9.0 };
+      if (moodMap[latestBiometrics.mood]) return moodMap[latestBiometrics.mood];
+    }
+    if (latestAssessmentLevel && typeof latestAssessmentLevel === 'string') {
+      const lvl = latestAssessmentLevel.toLowerCase();
+      if (lvl.includes('high') || lvl.includes('alert') || lvl.includes('severe')) return 7.5;
+      if (lvl.includes('mod') || lvl.includes('manageable')) return 5.0;
+      if (lvl.includes('calm') || lvl.includes('low') || lvl.includes('optimal')) return 2.5;
+    }
+    return null;
+  })();
+
+  const pacingInfo = (() => {
+    if (isCrunchMode) {
+      return {
+        label: '25m Crunch',
+        status: 'Crunch',
+        color: '#DC2626',
+        bg: 'rgba(239, 68, 68, 0.10)',
+        border: 'rgba(239, 68, 68, 0.22)',
+      };
+    }
+    if (latestStress !== null) {
+      if (latestStress >= 6.5) {
+        return {
+          label: '25m Focus',
+          status: 'High Alert',
+          color: '#DC2626',
+          bg: 'rgba(239, 68, 68, 0.10)',
+          border: 'rgba(239, 68, 68, 0.22)',
+        };
+      }
+      if (latestStress >= 4.0) {
+        return {
+          label: '35m Flow',
+          status: 'Moderate',
+          color: '#B45309',
+          bg: 'rgba(217, 119, 6, 0.10)',
+          border: 'rgba(217, 119, 6, 0.22)',
+        };
+      }
+      return {
+        label: '45m Deep',
+        status: 'Calm',
+        color: '#0F766E',
+        bg: 'rgba(13, 148, 136, 0.10)',
+        border: 'rgba(13, 148, 136, 0.22)',
+      };
+    }
+    // Brand-new user with no logs: 25m Base with neutral Standard badge
+    return {
+      label: '25m Base',
+      status: 'Standard',
+      color: '#64748B',
+      bg: 'rgba(100, 116, 139, 0.10)',
+      border: 'rgba(100, 116, 139, 0.20)',
+    };
+  })();
 
   return (
     <View style={styles.container}>
@@ -1007,7 +1059,7 @@ export default function HomeScreen({ navigation }) {
 
               <View style={styles.snapshotHeaderRow}>
                 <Text style={styles.snapshotLabel} numberOfLines={1}>
-                  SLEEP BALANCE
+                  SLEEP
                 </Text>
                 <View
                   style={[
@@ -1068,28 +1120,24 @@ export default function HomeScreen({ navigation }) {
                   style={[
                     styles.snapshotPill,
                     {
-                      backgroundColor: isCrunchMode
-                        ? 'rgba(239, 68, 68, 0.10)'
-                        : 'rgba(16, 185, 129, 0.10)',
-                      borderColor: isCrunchMode
-                        ? 'rgba(239, 68, 68, 0.22)'
-                        : 'rgba(16, 185, 129, 0.22)',
+                      backgroundColor: pacingInfo.bg,
+                      borderColor: pacingInfo.border,
                     },
                   ]}
                 >
                   <Text
                     style={[
                       styles.snapshotPillText,
-                      { color: isCrunchMode ? '#DC2626' : '#15803D' },
+                      { color: pacingInfo.color },
                     ]}
                   >
-                    {isCrunchMode ? 'Crunch' : 'Optimal'}
+                    {pacingInfo.status}
                   </Text>
                 </View>
               </View>
 
               <Text style={styles.snapshotValue} numberOfLines={1}>
-                {isCrunchMode ? '25m Crunch' : '35m Flow'}
+                {pacingInfo.label}
               </Text>
             </View>
           </View>
@@ -1118,30 +1166,47 @@ export default function HomeScreen({ navigation }) {
             <View style={styles.barChartContainer}>
               {(() => {
                 const trendData = getDynamicTrend();
-                const maxVal = Math.max(...trendData.map((d) => d.val), 10);
                 return trendData.map((item, index) => {
-                  const isMax = item.val === maxVal && item.val > 10;
-                  const barHeight = Math.max(14, Math.min(84, item.val));
+                  const fillHeight = item.hasStress
+                    ? Math.max(10, Math.min(64, (item.stressScore / 10) * 64))
+                    : 0;
+                  const isHighAlert = item.hasStress && item.stressScore >= 6.5;
+                  const isModerate = item.hasStress && item.stressScore >= 4.0;
+                  const barColor = isHighAlert
+                    ? '#DC2626'
+                    : isModerate
+                    ? '#D97706'
+                    : item.hasStress
+                    ? '#0D9488'
+                    : 'transparent';
+                  const shadowColor = isHighAlert
+                    ? '#DC2626'
+                    : isModerate
+                    ? '#D97706'
+                    : '#0D9488';
+
                   return (
-                    <View key={index} style={styles.barWrapper}>
+                    <View key={item.day || index} style={styles.barWrapper}>
                       <View style={styles.barTrack}>
-                        {/* Subtle Background Track Capsule (56px) */}
+                        {/* Subtle Background Track Capsule (64px) */}
                         <View style={styles.barCapsuleBackground} />
-                        <View
-                          style={[
-                            styles.barInner,
-                            {
-                              height: barHeight,
-                              backgroundColor: isMax ? '#0D9488' : 'rgba(13, 148, 136, 0.22)',
-                              shadowColor: isMax ? '#0D9488' : 'transparent',
-                              shadowOpacity: isMax ? 0.35 : 0,
-                              shadowRadius: 6,
-                              elevation: isMax ? 2 : 0,
-                            },
-                          ]}
-                        />
+                        {item.hasStress ? (
+                          <View
+                            style={[
+                              styles.barInner,
+                              {
+                                height: fillHeight,
+                                backgroundColor: barColor,
+                                shadowColor: shadowColor,
+                                shadowOpacity: 0.35,
+                                shadowRadius: 6,
+                                elevation: 2,
+                              },
+                            ]}
+                          />
+                        ) : null}
                       </View>
-                      <Text style={[styles.barDayText, isMax && styles.barDayTextActive]}>
+                      <Text style={[styles.barDayText, item.hasStress && styles.barDayTextActive]}>
                         {item.day}
                       </Text>
                     </View>
@@ -1165,7 +1230,6 @@ export default function HomeScreen({ navigation }) {
             {/* Header */}
             <View style={styles.guideHeader}>
               <View style={styles.guideHeaderBadge}>
-                <Sparkles size={14} color="#0D9488" />
                 <Text style={styles.guideBadgeText}>QUICK START GUIDE</Text>
               </View>
               <TouchableOpacity
@@ -1252,7 +1316,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 20,
     paddingTop: 16,
-    paddingBottom: 110, // Generous padding so floating bottom tab bar never covers content
+    paddingBottom: 115, // Generous padding so floating bottom tab bar never covers content
   },
 
   // Subtle Soft Mint/Aqua Ambient Circles
@@ -1881,7 +1945,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   barTrack: {
-    height: 84,
+    height: 64,
     justifyContent: 'flex-end',
     alignItems: 'center',
     width: '100%',
@@ -1891,8 +1955,8 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 0,
     width: 14,
-    height: 56,
-    borderRadius: 8,
+    height: 64,
+    borderRadius: 7,
     backgroundColor: 'rgba(13, 148, 136, 0.08)',
   },
   barInner: {

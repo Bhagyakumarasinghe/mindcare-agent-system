@@ -419,10 +419,22 @@ async def get_weekly_report(
                 if tf and tf.lower() not in ("none", "null", "undefined", ""):
                     workload_factor = tf
 
+            academic_keywords = ("workload", "deadline", "exam", "viva", "coding", "thesis", "academic", "studies", "study")
+            is_academic = any(k in workload_factor.lower() for k in academic_keywords)
+
+            if is_academic:
+                pacing_text_moderate = "Structure your study sessions with 45m focus / 10m reset intervals to maintain sustained working memory stamina."
+                pacing_text_high = "Break demanding study tasks into 25m focus / 5m reset intervals to prevent cognitive fatigue and mental overload."
+                pacing_text_low = "Maintain your steady study schedule with scheduled 15m pauses to preserve focus stamina."
+            else:
+                pacing_text_moderate = "Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm."
+                pacing_text_high = "Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm."
+                pacing_text_low = "Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm."
+
             if evaluated_stress >= 7.0:
                 cognitive_rec = {
-                    "title": "Cognitive Task Chunking",
-                    "desc": f"Break demanding {workload_factor} tasks into 25m focus / 5m reset intervals to prevent cognitive fatigue and mental overload.",
+                    "title": "Cognitive Task Chunking" if is_academic else "Mindful Task Management",
+                    "desc": pacing_text_high,
                     "icon": "Clock"
                 }
                 autonomic_rec = {
@@ -432,8 +444,8 @@ async def get_weekly_report(
                 }
             elif evaluated_stress >= 4.0:
                 cognitive_rec = {
-                    "title": "Cognitive Pacing",
-                    "desc": f"Structure your {workload_factor} sessions with 45m focus / 10m reset intervals to maintain sustained working memory stamina.",
+                    "title": "Cognitive Pacing" if is_academic else "Mindful Task Management",
+                    "desc": pacing_text_moderate,
                     "icon": "Clock"
                 }
                 autonomic_rec = {
@@ -443,8 +455,8 @@ async def get_weekly_report(
                 }
             else:
                 cognitive_rec = {
-                    "title": "Balanced Study Cadence",
-                    "desc": f"Maintain your steady {workload_factor} study schedule with scheduled 15m pauses to preserve focus stamina.",
+                    "title": "Balanced Study Cadence" if is_academic else "Mindful Task Management",
+                    "desc": pacing_text_low,
                     "icon": "Clock"
                 }
                 autonomic_rec = {

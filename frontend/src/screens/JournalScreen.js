@@ -29,6 +29,7 @@ import {
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { analyzeAndRecordJournal, getJournalHistory, getUserProfile } from '../api/authService';
+import { recordRelaxSession } from '../utils/activityTracker';
 import CrisisModal from '../components/CrisisModal';
 
 const EMOTIONS = [
@@ -186,6 +187,9 @@ const JournalScreen = ({ navigation }) => {
           console.log('Error caching journal entry locally:', e?.message || e);
         }
 
+        // Increment live relaxation counter for journal reflection
+        recordRelaxSession(activeUserId, 3).catch(() => {});
+
         Alert.alert('Reflection Recorded', 'Your encrypted reflection has been saved to your timeline.');
       } else {
         throw new Error('Analysis incomplete');
@@ -225,6 +229,9 @@ const JournalScreen = ({ navigation }) => {
       } catch (e) {
         console.log('Error caching local fallback entry:', e?.message || e);
       }
+
+      // Increment live relaxation counter for journal reflection
+      recordRelaxSession(activeUserId, 3).catch(() => {});
 
       setJournalInput('');
       Alert.alert('Reflection Recorded', 'Your reflection has been recorded to your clinical journal.');

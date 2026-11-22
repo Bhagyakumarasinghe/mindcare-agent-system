@@ -27,7 +27,7 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getUserAnalytics, getWeeklyReport, getUserProfile } from '../api/authService';
-import { generateClinicalHTMLReport } from '../utils/clinicalReportPdf';
+import { generateClinicalHTMLReport, exportClinicalPDF, isAcademicTrigger } from '../utils/clinicalReportPdf';
 
 let cachedWeeklyReportData = null;
 
@@ -48,12 +48,29 @@ const WeeklyReportScreen = ({ navigation, route }) => {
       if (!initialReport && !reportData) {
         setLoading(true);
       }
-      // 1. Prioritize params passed from AssessmentScreen navigation
+
+      // 1. Resolve active user ID
+      let activeUserId = 'demo_user';
+      try {
+        const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+        if (cachedProf) {
+          const parsedProf = JSON.parse(cachedProf);
+          if (parsedProf.id) activeUserId = String(parsedProf.id);
+        }
+        const profRes = await getUserProfile();
+        if (profRes?.data?.id || profRes?.data?._id || profRes?.data?.user_id) {
+          activeUserId = String(profRes.data.id || profRes.data._id || profRes.data.user_id);
+        }
+      } catch (profErr) {
+        // demo_user fallback
+      }
+
+      // 2. Prioritize params passed from AssessmentScreen navigation
       if (routeParams && (routeParams.predicted_stress || routeParams.assessment_id)) {
         setLatestAssessment(routeParams);
-      } else {
-        // Fetch cached ML assessment from Step 10 if available
-        const cached = await AsyncStorage.getItem('mindcare_latest_assessment');
+      } else if (activeUserId && activeUserId !== 'demo_user') {
+        // Fetch cached ML assessment for this active user
+        const cached = await AsyncStorage.getItem(`mindcare_latest_assessment_${activeUserId}`);
         if (cached) {
           try {
             const parsed = JSON.parse(cached);
@@ -62,17 +79,6 @@ const WeeklyReportScreen = ({ navigation, route }) => {
             console.log("Cached assessment parsing error");
           }
         }
-      }
-
-      // 2. Resolve active user ID
-      let activeUserId = 'demo_user';
-      try {
-        const profRes = await getUserProfile();
-        if (profRes?.data?.id || profRes?.data?._id || profRes?.data?.user_id) {
-          activeUserId = profRes.data.id || profRes.data._id || profRes.data.user_id;
-        }
-      } catch (profErr) {
-        // demo_user fallback
       }
 
       // 3. Fetch longitudinal weekly report directly from Neo4j
@@ -180,6 +186,7 @@ const WeeklyReportScreen = ({ navigation, route }) => {
     const numericStress = Number(avgStress) || 5;
     const latestSleep = reportData?.avg_sleep ?? latestAssessment?.sleep_hours ?? 7.0;
     const workloadFactor = commonTrigger || "academic";
+    const isAcademic = isAcademicTrigger(workloadFactor);
 
     const sleepRec = {
       title: "Circadian Rhythm Stability",
@@ -190,10 +197,16 @@ const WeeklyReportScreen = ({ navigation, route }) => {
     let cognitiveRec;
     let autonomicRec;
 
+    const cognitivePacingDesc = isAcademic
+      ? "Structure your study sessions with 45m focus / 10m reset intervals to maintain sustained working memory stamina."
+      : "Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm.";
+
     if (numericStress >= 7 || latestAssessment?.predicted_stress === "High") {
       cognitiveRec = {
         title: "Cognitive Task Chunking",
-        desc: `Break demanding ${workloadFactor} work into 25m focus / 5m reset intervals to prevent cognitive fatigue.`,
+        desc: isAcademic
+          ? "Break demanding study tasks into 25m focus / 5m reset intervals to prevent cognitive fatigue."
+          : "Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm.",
         icon: "Clock"
       };
       autonomicRec = {
@@ -204,7 +217,7 @@ const WeeklyReportScreen = ({ navigation, route }) => {
     } else if (numericStress >= 4 || latestAssessment?.predicted_stress === "Moderate") {
       cognitiveRec = {
         title: "Cognitive Pacing",
-        desc: `Structure your ${workloadFactor} sessions with 45m focus / 10m reset intervals to maintain sustained working memory stamina.`,
+        desc: cognitivePacingDesc,
         icon: "Clock"
       };
       autonomicRec = {
@@ -215,7 +228,9 @@ const WeeklyReportScreen = ({ navigation, route }) => {
     } else {
       cognitiveRec = {
         title: "Balanced Study Cadence",
-        desc: `Maintain your steady ${workloadFactor} cadence with scheduled 15m pauses to preserve focus stamina.`,
+        desc: isAcademic
+          ? "Maintain your steady study cadence with scheduled 15m pauses to preserve focus stamina."
+          : "Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm.",
         icon: "Clock"
       };
       autonomicRec = {
@@ -251,8 +266,6 @@ const WeeklyReportScreen = ({ navigation, route }) => {
   const handleExportPDF = async () => {
     if (isExporting) return;
     try {
-      setIsExporting(true);
-
       const combinedData = {
         ...reportData,
         user_name: reportData?.user_name || latestAssessment?.user_name || userName || 'Student',
@@ -276,16 +289,9 @@ const WeeklyReportScreen = ({ navigation, route }) => {
         }
       };
 
-      const htmlContent = generateClinicalHTMLReport(combinedData);
-      await Print.printAsync({ html: htmlContent });
+      await exportClinicalPDF(combinedData, setIsExporting);
     } catch (error) {
-      const msg = error?.message || '';
-      if (!msg.toLowerCase().includes('cancel') && !msg.toLowerCase().includes('dismiss')) {
-        console.error('PDF Generation Error:', error);
-        Alert.alert('Export Error', 'Unable to generate PDF report: ' + msg);
-      }
-    } finally {
-      setIsExporting(false);
+      console.warn('Export pipeline notice:', error?.message || error);
     }
   };
 

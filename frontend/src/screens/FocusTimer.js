@@ -13,6 +13,7 @@ import { ArrowLeft, Play, Pause, RotateCcw, Target, Clock, Plus } from 'lucide-r
 import Svg, { Circle } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logActivity } from '../api/authService';
+import { recordStudySession } from '../utils/activityTracker';
 
 // Focus Duration Presets
 const FOCUS_PRESETS = [
@@ -135,24 +136,43 @@ const FocusTimer = ({ navigation, route }) => {
   const logFocusActivity = async (secondsSpent) => {
     if (secondsSpent < 10) return;
     try {
-      const userStr = await AsyncStorage.getItem('user');
-      const parsedUser = userStr ? JSON.parse(userStr) : null;
-      const userId = parsedUser?.id || 'demo_user';
-      const durationMinutes = Math.max(1, Math.round(secondsSpent / 60));
+      let userId = '';
+      try {
+        const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+        if (cachedProf) {
+          const cp = JSON.parse(cachedProf);
+          userId = cp?.id || cp?.user_id || '';
+        }
+      } catch {
+        // ignore
+      }
+      if (!userId) {
+        const userStr = await AsyncStorage.getItem('user');
+        const parsedUser = userStr ? JSON.parse(userStr) : null;
+        userId = parsedUser?.id || parsedUser?.user_id || 'demo_user';
+      }
 
+      const durationMinutes = Math.max(1, Math.round(secondsSpent / 60));
       const activeGoalTitle = customGoal.trim() || selectedGoal;
 
-      await logActivity({
-        user_id: userId,
-        activity_type: 'Study Timer',
-        duration_minutes: durationMinutes,
-        metadata: {
-          study_goal: activeGoalTitle,
-          seconds_spent: secondsSpent,
-          configured_minutes: selectedMinutes,
-        },
-      });
-      console.log('✅ Focus activity logged to backend successfully');
+      // Synchronize live activity counter for study first so it always persists
+      await recordStudySession(userId, durationMinutes, activeGoalTitle);
+
+      try {
+        await logActivity({
+          user_id: userId && userId !== 'demo_user' ? userId : undefined,
+          activity_type: 'Focus Timer',
+          duration_minutes: durationMinutes,
+          metadata: {
+            study_goal: activeGoalTitle,
+            seconds_spent: secondsSpent,
+            configured_minutes: selectedMinutes,
+          },
+        });
+        console.log('✅ Focus activity logged to backend successfully');
+      } catch (beErr) {
+        console.warn('Backend focus activity log notice:', beErr?.message || beErr);
+      }
     } catch (error) {
       console.error('❌ Error logging focus session:', error?.message || error);
     }

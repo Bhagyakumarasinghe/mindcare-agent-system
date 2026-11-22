@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
+  ArrowLeft,
   Clock, 
   Lightbulb, 
   ChevronRight,
@@ -19,6 +20,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getUserProfile, getAcademicPacing, getDailyTip } from '../api/authService';
+import { recordRelaxSession } from '../utils/activityTracker';
 
 const BASE_URL = 'http://10.234.214.156:8000';
 
@@ -273,12 +275,24 @@ const RelaxScreen = ({ navigation }) => {
 
       <SafeAreaView style={styles.safeArea}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-          {/* Top Header (Compact & Tightened) */}
+          {/* Top Header with Circular Back Button */}
           <View style={styles.header}>
-            <Text style={styles.title}>Mindful Calm & Coping</Text>
-            <Text style={styles.subtitle}>
-              Evidence-based relaxation tools to restore mental balance
-            </Text>
+            <View style={styles.headerTopRow}>
+              <TouchableOpacity
+                style={styles.backBtn}
+                onPress={() => (navigation.canGoBack() ? navigation.goBack() : navigation.navigate('Home'))}
+                activeOpacity={0.8}
+                accessibilityLabel="Go back"
+              >
+                <ArrowLeft size={20} color="#0D9488" strokeWidth={2.5} />
+              </TouchableOpacity>
+              <View style={styles.headerTitleWrap}>
+                <Text style={styles.title}>Mindful Calm & Coping</Text>
+                <Text style={styles.subtitle}>
+                  Evidence-based relaxation tools to restore mental balance
+                </Text>
+              </View>
+            </View>
           </View>
 
           {/* Hero Banner: Full-Bleed 185px Auto-Slide with Dynamic Thematic Copy */}
@@ -441,22 +455,40 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(56, 189, 248, 0.18)',
   },
 
-  // Header (Compact & Tightened)
+  // Header (Compact & Tightened with Circular Back Button)
   header: { 
-    marginTop: 0,
+    marginTop: 4,
     marginBottom: 14,
   },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F0FDFA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+  },
+  headerTitleWrap: {
+    flex: 1,
+  },
   title: { 
-    fontSize: 24, 
+    fontSize: 22, 
     fontWeight: '800', 
     color: '#0F172A',
     letterSpacing: -0.4,
   },
   subtitle: { 
-    fontSize: 13, 
+    fontSize: 12.5, 
     color: '#64748B', 
-    marginTop: 4, 
-    lineHeight: 19 
+    marginTop: 2, 
+    lineHeight: 17,
   },
 
   // Hero Banner: Full-Bleed 185px Auto-Slide Card

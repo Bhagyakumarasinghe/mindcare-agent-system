@@ -23,6 +23,7 @@ import { Eye, EyeOff, Lock, Mail, User } from 'lucide-react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useFocusEffect } from '@react-navigation/native';
 import { registerUser } from '../api/authService';
+import { clearLegacyGlobalStorage } from '../utils/activityTracker';
 import GlassAlert, { useGlassAlert } from '../components/GlassAlert';
 
 const { width, height } = Dimensions.get('window');
@@ -167,6 +168,8 @@ export default function SignupScreen({ navigation, onNavigateToLogin, onSignup }
         const response = await registerUser(trimmedName, trimmedEmail, trimmedPassword);
 
         if (response.status === 200 || response.status === 201) {
+          // Clear any legacy un-scoped cache for clean registration
+          await clearLegacyGlobalStorage();
           showAlert(
             'Account Created',
             'Welcome to MindCare! An OTP verification code has been dispatched to your email address.',

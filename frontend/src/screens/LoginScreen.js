@@ -24,6 +24,8 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { loginUser, getUserProfile } from '../api/authService';
+import { clearLegacyGlobalStorage } from '../utils/activityTracker';
+import { invalidateAnalyticsCache } from './AnalyticsScreen';
 import GlassAlert, { useGlassAlert } from '../components/GlassAlert';
 
 const { width, height } = Dimensions.get('window');
@@ -142,6 +144,10 @@ export default function LoginScreen({ navigation, onNavigateToSignup, onLogin })
       } else {
         const response = await loginUser(trimmedEmail, trimmedPassword);
         if (response.status === 200 && response.data?.access_token) {
+          // Strict user isolation: purge any legacy global non-scoped storage
+          await clearLegacyGlobalStorage();
+          try { invalidateAnalyticsCache(); } catch {}
+
           await AsyncStorage.setItem('userToken', response.data.access_token);
 
           // Cache user profile immediately upon login for zero-delay display on HomeScreen

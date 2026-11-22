@@ -47,6 +47,7 @@ import {
   getUserProfile,
   decomposeAcademicTask,
 } from '../api/authService';
+import { recordStudySession } from '../utils/activityTracker';
 
 // Module-level cache for instantaneous mount & freeze-prevention
 let cachedSubjectsData = null;
@@ -56,6 +57,7 @@ export default function AplusTrackScreen({ navigation }) {
   const [loading, setLoading] = useState(!cachedSubjectsData);
   const [subjects, setSubjects] = useState(cachedSubjectsData || []);
   const [recommendation, setRecommendation] = useState(cachedRecData || null);
+  const [latestBiometrics, setLatestBiometrics] = useState(null);
   const [userId, setUserId] = useState('demo_user');
   const userIdRef = useRef('demo_user');
   const isFetchingRef = useRef(false);
@@ -116,7 +118,21 @@ export default function AplusTrackScreen({ navigation }) {
         }
 
         const aplusCacheKey = `@mindcare_aplus_cache_${uid}`;
-        const cachedAplus = await AsyncStorage.getItem(aplusCacheKey);
+        const [cachedAplus, scopedBio] = await Promise.all([
+          AsyncStorage.getItem(aplusCacheKey),
+          uid && uid !== 'demo_user' ? AsyncStorage.getItem(`@mindcare_latest_biometrics_${uid}`) : null,
+        ]);
+
+        if (scopedBio && isMounted) {
+          try {
+            setLatestBiometrics(JSON.parse(scopedBio));
+          } catch (bioErr) {
+            // ignore
+          }
+        } else if (isMounted) {
+          setLatestBiometrics(null);
+        }
+
         if (cachedAplus) {
           const parsedAplus = JSON.parse(cachedAplus);
           if (parsedAplus?.subjects && Array.isArray(parsedAplus.subjects) && isMounted) {
@@ -229,7 +245,30 @@ export default function AplusTrackScreen({ navigation }) {
           // ignore
         }
       };
+
+      const syncLatestBiometrics = async () => {
+        try {
+          let uid = userIdRef.current;
+          if (!uid || uid === 'demo_user') {
+            const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+            if (cachedProf) {
+              const parsedProf = JSON.parse(cachedProf);
+              uid = parsedProf?.id || parsedProf?.user_id || '';
+            }
+          }
+          if (uid && uid !== 'demo_user') {
+            const scopedBio = await AsyncStorage.getItem(`@mindcare_latest_biometrics_${uid}`);
+            setLatestBiometrics(scopedBio ? JSON.parse(scopedBio) : null);
+          } else {
+            setLatestBiometrics(null);
+          }
+        } catch (e) {
+          // ignore
+        }
+      };
+
       syncCrunchMode();
+      syncLatestBiometrics();
       loadScreenData();
     }, [loadScreenData])
   );
@@ -341,6 +380,10 @@ export default function AplusTrackScreen({ navigation }) {
     const nextStatus = !currentStatus;
 
     // Optimistically update subject checklist and completion percentage
+    if (nextStatus) {
+      recordStudySession(userIdRef.current, focusMinutes || 25).catch(() => {});
+    }
+
     setSubjects((prevSubjects) => {
       const updated = prevSubjects.map((sub) => {
         if (sub.id !== subjectId) return sub;
@@ -509,6 +552,21 @@ export default function AplusTrackScreen({ navigation }) {
   const focusMinutes = isCrunchMode ? 25 : (recommendation?.focus_minutes || 35);
   const breakMinutes = isCrunchMode ? 5 : (recommendation?.break_minutes || 5);
 
+  // Resolved Biometrics: Prioritize fresh local biometrics cache from Mood Check-in, then recommendation
+  const rawSleep =
+    latestBiometrics?.sleep_hours !== undefined && latestBiometrics?.sleep_hours !== null
+      ? latestBiometrics.sleep_hours
+      : recommendation?.biometrics?.sleep_hours;
+  const numSleep = rawSleep !== undefined && rawSleep !== null && !isNaN(Number(rawSleep)) ? Number(rawSleep) : 7;
+  const displaySleepHours = numSleep % 1 === 0 ? numSleep : numSleep.toFixed(1);
+
+  const displayStressLevel =
+    latestBiometrics?.stress_level !== undefined && latestBiometrics?.stress_level !== null
+      ? (typeof latestBiometrics.stress_level === 'number'
+          ? (latestBiometrics.stress_level > 6.5 ? 'High' : latestBiometrics.stress_level > 4.0 ? 'Moderate' : 'Low')
+          : String(latestBiometrics.stress_level))
+      : recommendation?.biometrics?.stress_level || 'Moderate';
+
   // Filter subjects and their topics in real-time based on searchQuery
   const filteredSubjects = subjects.filter((sub) => {
     if (!searchQuery.trim()) return true;
@@ -606,18 +664,18 @@ export default function AplusTrackScreen({ navigation }) {
           </View>
 
           {/* Biometrics Status Row */}
-          {recommendation?.biometrics && (
+          {(recommendation?.biometrics || latestBiometrics) && (
             <View style={styles.biometricsRow}>
               <View style={styles.biometricPill}>
                 <Clock size={11} color="#0F766E" />
                 <Text style={styles.biometricPillText}>
-                  Sleep: {recommendation.biometrics.sleep_hours || 7}h
+                  Sleep: {displaySleepHours}h
                 </Text>
               </View>
               <View style={styles.biometricPill}>
                 <Flame size={11} color="#0F766E" />
                 <Text style={styles.biometricPillText}>
-                  Stress: {recommendation.biometrics.stress_level || 'Moderate'}
+                  Stress: {displayStressLevel}
                 </Text>
               </View>
             </View>

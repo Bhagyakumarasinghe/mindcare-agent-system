@@ -21,6 +21,7 @@ import {
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logActivity } from '../api/authService';
+import { recordRelaxSession } from '../utils/activityTracker';
 
 // 3 Evidence-Based Clinical Breathing Protocols
 const BREATHING_PROTOCOLS = [
@@ -180,18 +181,25 @@ const BreathingExercise = ({ navigation, route }) => {
       userId = userId || 'demo_user';
       const durationMinutes = Math.max(1, Math.round(secondsSpent / 60));
 
-      await logActivity({
-        user_id: userId,
-        activity_type: isInstantMode ? 'Instant Decompression Breathing' : 'Breathing Exercise',
-        duration_minutes: durationMinutes,
-        metadata: {
-          protocol_name: activeProtocol.name,
-          mode: isInstantMode ? 'instant_decompression' : 'standard',
-          completed_cycles: completedCycles,
-          seconds_spent: secondsSpent,
-        },
-      });
-      console.log('✅ Breathing activity logged successfully to backend');
+      // Synchronize live activity counter for relaxation first so it always persists
+      await recordRelaxSession(userId, durationMinutes);
+
+      try {
+        await logActivity({
+          user_id: userId && userId !== 'demo_user' ? userId : undefined,
+          activity_type: isInstantMode ? 'Instant Decompression Breathing' : 'Breathing Exercise',
+          duration_minutes: durationMinutes,
+          metadata: {
+            protocol_name: activeProtocol.name,
+            mode: isInstantMode ? 'instant_decompression' : 'standard',
+            completed_cycles: completedCycles,
+            seconds_spent: secondsSpent,
+          },
+        });
+        console.log('✅ Breathing activity logged successfully to backend');
+      } catch (beErr) {
+        console.warn('Backend breathing activity log notice:', beErr?.message || beErr);
+      }
     } catch (error) {
       console.error('❌ Error logging breathing activity:', error?.message || error);
     }

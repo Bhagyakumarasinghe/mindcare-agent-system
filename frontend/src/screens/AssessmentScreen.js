@@ -145,9 +145,19 @@ export default function AssessmentScreen({ navigation }) {
   const fetchActiveUserAndContext = async () => {
     try {
       setLoadingContext(true);
+      const cached = await AsyncStorage.getItem('@mindcare_cached_profile');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (parsed.id) {
+            setCurrentUserId(String(parsed.id));
+          }
+        } catch (_) {}
+      }
+
       const profileRes = await getUserProfile();
       if (profileRes?.data?.id) {
-        setCurrentUserId(profileRes.data.id);
+        setCurrentUserId(String(profileRes.data.id));
       }
 
       // Fetch Longitudinal Memory and Gemini Check-in Prompt
@@ -345,8 +355,10 @@ export default function AssessmentScreen({ navigation }) {
           timestamp: new Date().toISOString()
         };
 
-        // Cache for Weekly Report Screen and dashboard components
-        await AsyncStorage.setItem("mindcare_latest_assessment", JSON.stringify(resultData));
+        // Cache for Weekly Report Screen and dashboard components (per-user scoped)
+        if (currentUserId && currentUserId !== "demo_user") {
+          await AsyncStorage.setItem(`mindcare_latest_assessment_${currentUserId}`, JSON.stringify(resultData));
+        }
         setAssessmentResult(resultData);
       } else {
         throw new Error("Assessment submission failed");
@@ -383,7 +395,9 @@ export default function AssessmentScreen({ navigation }) {
           }
         ]
       };
-      await AsyncStorage.setItem("mindcare_latest_assessment", JSON.stringify(fallbackResult));
+      if (currentUserId && currentUserId !== "demo_user") {
+        await AsyncStorage.setItem(`mindcare_latest_assessment_${currentUserId}`, JSON.stringify(fallbackResult));
+      }
       setAssessmentResult(fallbackResult);
     } finally {
       setIsSubmitting(false);

@@ -9,26 +9,31 @@ import {
   RefreshControl,
   StatusBar,
   Alert,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  ChevronRight,
-  FileText,
-  TrendingDown,
-  Calendar,
-  Activity,
-  Heart,
-  BookOpen,
-  AlertCircle,
-  ClipboardList,
   Download,
+  TrendingDown,
+  Moon,
+  Calendar,
+  Flame,
+  Wind,
+  GraduationCap,
+  ChevronRight,
+  Activity,
+  AlertCircle,
+  Heart,
+  MessageCircle,
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system/legacy';
 import { getUserSummary, getJournalSummary, getUserProfile } from '../api/authService';
-import { generateClinicalHTMLReport } from '../utils/clinicalReportPdf';
+import { generateClinicalHTMLReport, exportClinicalPDF, isAcademicTrigger } from '../utils/clinicalReportPdf';
+import { getActivityStats, syncActivityStats, computeWeeklyStressTrend } from '../utils/activityTracker';
 
 // Module-level cache to provide instant transitions between screens
 let cachedAnalytics = null;
@@ -39,22 +44,30 @@ export const invalidateAnalyticsCache = () => {
   cachedJournalSummary = null;
 };
 
-const AnalyticsScreen = ({ navigation }) => {
+export default function AnalyticsScreen({ navigation }) {
   const [analytics, setAnalytics] = useState(cachedAnalytics);
   const [journalSummary, setJournalSummary] = useState(cachedJournalSummary);
   const [latestBiometrics, setLatestBiometrics] = useState(null);
+  const [userName, setUserName] = useState('Student');
+  const [activityStats, setActivityStats] = useState({
+    relaxSessions: 0,
+    relaxMinutes: 0,
+    studySessions: 0,
+    studyMinutes: 0,
+  });
   const [loading, setLoading] = useState(!cachedAnalytics);
   const [refreshing, setRefreshing] = useState(false);
-  const [isNavigatingReport, setIsNavigatingReport] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
   const isFetchingRef = useRef(false);
+
+  const roundOne = (num) => Math.round(Number(num) * 10) / 10;
 
   const loadData = useCallback(async (isManualRefresh = false) => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
 
-    // Invalidate module-level cache if a recent mood log flagged it as stale
+    // Check if stale flag is set from a recent mood check-in
     try {
       const isStale = await AsyncStorage.getItem('@mindcare_analytics_cache_stale');
       if (isStale) {
@@ -72,13 +85,16 @@ const AnalyticsScreen = ({ navigation }) => {
       setLoading(true);
     }
 
-    // Sync latest local biometrics cache immediately before network round-trips
+    // Hydrate latest biometrics immediately
     try {
       const cachedProfile = await AsyncStorage.getItem('@mindcare_cached_profile');
       let quickUid = '';
       if (cachedProfile) {
         const p = JSON.parse(cachedProfile);
         quickUid = p.id || p.user_id || '';
+        if (p.first_name || p.name || p.fullName) {
+          setUserName(p.first_name || p.name || p.fullName);
+        }
       }
       const [scopedBio, globalBio] = await Promise.all([
         quickUid ? AsyncStorage.getItem(`@mindcare_latest_biometrics_${quickUid}`) : null,
@@ -88,12 +104,15 @@ const AnalyticsScreen = ({ navigation }) => {
       if (bioRaw) {
         setLatestBiometrics(JSON.parse(bioRaw));
       }
+
+      // Load unified activity stats
+      const stats = await getActivityStats(quickUid);
+      setActivityStats(stats);
     } catch (e) {
       // ignore
     }
 
     try {
-      // Parallel fetch of user summary and user profile
       const [summaryResult, profileResult] = await Promise.allSettled([
         getUserSummary(),
         getUserProfile(),
@@ -103,27 +122,37 @@ const AnalyticsScreen = ({ navigation }) => {
       if (profileResult.status === 'fulfilled' && profileResult.value?.data) {
         const pData = profileResult.value.data;
         activeUserId = pData.id || pData._id || pData.user_id || 'demo_user';
+        if (pData.first_name || pData.name || pData.fullName) {
+          setUserName(pData.first_name || pData.name || pData.fullName);
+        }
       }
 
-      // Re-check scoped biometrics with resolved user ID
+      let dataPayload = null;
+      if (summaryResult.status === 'fulfilled' && summaryResult.value?.data) {
+        dataPayload = summaryResult.value.data.data || summaryResult.value.data;
+        cachedAnalytics = dataPayload;
+        setAnalytics(dataPayload);
+      }
+
+      // Re-sync scoped biometrics & stats with resolved user ID and backend payload
       try {
-        const scopedBio = activeUserId
-          ? await AsyncStorage.getItem(`@mindcare_latest_biometrics_${activeUserId}`)
-          : null;
+        const [scopedBio, stats] = await Promise.all([
+          activeUserId ? AsyncStorage.getItem(`@mindcare_latest_biometrics_${activeUserId}`) : null,
+          syncActivityStats(activeUserId, dataPayload),
+        ]);
         if (scopedBio) {
           setLatestBiometrics(JSON.parse(scopedBio));
+        } else {
+          setLatestBiometrics(null);
+        }
+        if (stats) {
+          setActivityStats(stats);
         }
       } catch (bioErr) {
         // ignore
       }
 
-      if (summaryResult.status === 'fulfilled' && summaryResult.value?.data) {
-        const dataPayload = summaryResult.value.data.data || summaryResult.value.data;
-        cachedAnalytics = dataPayload;
-        setAnalytics(dataPayload);
-      }
-
-      // Fetch longitudinal journal reflection patterns dynamically from Neo4j
+      // Longitudinal journal reflection patterns
       try {
         const jResult = await getJournalSummary(activeUserId);
         if (jResult?.data?.status === 'success') {
@@ -131,7 +160,7 @@ const AnalyticsScreen = ({ navigation }) => {
           setJournalSummary(jResult.data);
         }
       } catch (journalErr) {
-        console.log('Journal summary fetch note:', journalErr.message || journalErr);
+        // ignore
       }
     } catch (error) {
       console.warn('Analytics load notice:', error.message || error);
@@ -142,9 +171,12 @@ const AnalyticsScreen = ({ navigation }) => {
     }
   }, []);
 
-  // Fetch updated analytics once per focus without freezing the UI or triggering re-render loops
   useFocusEffect(
     useCallback(() => {
+      // Immediately hydrate local activity stats on focus for instant non-zero counts
+      getActivityStats().then((stats) => {
+        if (stats) setActivityStats(stats);
+      });
       loadData(false);
       return () => {
         isFetchingRef.current = false;
@@ -156,98 +188,17 @@ const AnalyticsScreen = ({ navigation }) => {
     loadData(true);
   };
 
-  // Map clinical assessment history and recent mood check-ins into 7-day weekly metrics
-  const mapHistoryToWeeklyTrend = (history, recentMoodLogs, localBio) => {
-    const weeklyMap = [
-      { day: 'Mon', val: 0, count: 0 },
-      { day: 'Tue', val: 0, count: 0 },
-      { day: 'Wed', val: 0, count: 0 },
-      { day: 'Thu', val: 0, count: 0 },
-      { day: 'Fri', val: 0, count: 0 },
-      { day: 'Sat', val: 0, count: 0 },
-      { day: 'Sun', val: 0, count: 0 },
-    ];
-
-    if (history && history.length > 0) {
-      history.forEach((entry) => {
-        if (entry.date && entry.score !== undefined) {
-          const cleanDate = entry.date.split('.')[0].replace('Z', '');
-          const dateObj = new Date(cleanDate);
-          if (!isNaN(dateObj.getTime())) {
-            let dayIdx = dateObj.getDay();
-            let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-            const safeScore = entry.score > 10 ? 10 : entry.score;
-            weeklyMap[adjustedIdx].val += safeScore;
-            weeklyMap[adjustedIdx].count += 1;
-          }
-        }
-      });
-    }
-
-    // Blend recent mood logs into the 7-day trend
-    const moodToStress = { Great: 2.0, Good: 3.5, Okay: 5.0, Bad: 7.5, Terrible: 9.0 };
-    if (recentMoodLogs && Array.isArray(recentMoodLogs) && recentMoodLogs.length > 0) {
-      recentMoodLogs.forEach((log) => {
-        const rawDate = log.date || log.timestamp;
-        if (rawDate) {
-          const cleanDate = typeof rawDate === 'string' ? rawDate.split('.')[0].replace('Z', '') : rawDate;
-          const dateObj = new Date(cleanDate);
-          if (!isNaN(dateObj.getTime())) {
-            let dayIdx = dateObj.getDay();
-            let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-            let stressVal = log.stress_score ?? log.stress_level;
-            if (stressVal === null || stressVal === undefined) {
-              stressVal = moodToStress[log.mood] ?? 5.0;
-            }
-            const safeScore = Math.min(10, Math.max(1, Number(stressVal)));
-            weeklyMap[adjustedIdx].val += safeScore;
-            weeklyMap[adjustedIdx].count += 1;
-          }
-        }
-      });
-    }
-
-    // Blend local latestBiometrics if available for today
-    if (localBio) {
-      const today = new Date();
-      let dayIdx = today.getDay();
-      let adjustedIdx = dayIdx === 0 ? 6 : dayIdx - 1;
-      let stressVal = localBio.stress_score ?? localBio.stress_level;
-      if (stressVal === null || stressVal === undefined) {
-        stressVal = moodToStress[localBio.mood] ?? 5.0;
-      }
-      const safeScore = Math.min(10, Math.max(1, Number(stressVal)));
-      weeklyMap[adjustedIdx].val += safeScore;
-      weeklyMap[adjustedIdx].count += 1;
-    }
-
-    const hasData = weeklyMap.some((item) => item.count > 0);
-    if (!hasData) {
-      return weeklyMap.map((d) => ({ day: d.day, val: 14 }));
-    }
-
-    return weeklyMap.map((item) => {
-      const avgScoreForDay = item.count > 0 ? item.val / item.count : 0;
-      return {
-        day: item.day,
-        val: avgScoreForDay > 0 ? Math.max(18, Math.min(100, avgScoreForDay * 10)) : 14,
-      };
-    });
-  };
-
-  const dynamicWeeklyTrend = mapHistoryToWeeklyTrend(
-    analytics?.history,
-    analytics?.recent_mood_logs,
-    latestBiometrics
-  );
-
-  // Blend local biometrics with recent_mood_logs for immediate rendering
+  // Blend local biometrics with recent_mood_logs for live UI updates
   const displayMoodLogs = useMemo(() => {
     const list = [...(analytics?.recent_mood_logs || [])];
     if (latestBiometrics) {
       const bioDate = latestBiometrics.date || latestBiometrics.timestamp || new Date().toISOString();
       const alreadyIncluded = list.some(
-        (m) => (m.date && m.date === bioDate) || (m.timestamp && m.timestamp === bioDate) || (m.mood === latestBiometrics.mood && Math.abs(new Date(m.date || m.timestamp || 0) - new Date(bioDate)) < 60000)
+        (m) =>
+          (m.date && m.date === bioDate) ||
+          (m.timestamp && m.timestamp === bioDate) ||
+          (m.mood === latestBiometrics.mood &&
+            Math.abs(new Date(m.date || m.timestamp || 0) - new Date(bioDate)) < 60000)
       );
       if (!alreadyIncluded) {
         list.unshift({
@@ -259,78 +210,330 @@ const AnalyticsScreen = ({ navigation }) => {
     return list;
   }, [analytics?.recent_mood_logs, latestBiometrics]);
 
-  const fallbackHolistic = [
-    { day: 'Mon', val: 14, score: 0, has_data: false },
-    { day: 'Tue', val: 14, score: 0, has_data: false },
-    { day: 'Wed', val: 14, score: 0, has_data: false },
-    { day: 'Thu', val: 14, score: 0, has_data: false },
-    { day: 'Fri', val: 14, score: 0, has_data: false },
-    { day: 'Sat', val: 14, score: 0, has_data: false },
-    { day: 'Sun', val: 14, score: 0, has_data: false },
-  ];
-  const holisticTrend =
-    analytics?.holistic_wellness_trend && Array.isArray(analytics.holistic_wellness_trend) && analytics.holistic_wellness_trend.length === 7
-      ? analytics.holistic_wellness_trend
-      : fallbackHolistic;
+  // Derived 3-Card Core Snapshot Values (neutral '--' / '0' when no logs)
+  const rawAvgStress = useMemo(() => {
+    if (analytics?.avg_stress !== undefined && analytics?.avg_stress !== null) {
+      const n = Number(analytics.avg_stress);
+      if (!isNaN(n) && n > 0) return roundOne(n);
+    }
+    if (latestBiometrics?.stress_score !== undefined && latestBiometrics?.stress_score !== null) {
+      const n = Number(latestBiometrics.stress_score);
+      if (!isNaN(n)) return roundOne(n);
+    }
+    return null;
+  }, [analytics?.avg_stress, latestBiometrics]);
 
-  const analyticsData = {
-    emotions: journalSummary?.emotions || journalSummary?.emotion_distribution || [],
-    stress_factors: journalSummary?.stress_factors || journalSummary?.top_triggers || [],
-    total_entries:
-      journalSummary?.total_entries ??
-      (displayMoodLogs?.length || 0),
-    avg_sentiment: journalSummary?.avg_sentiment ?? 0.0,
-  };
+  const rawAvgSleep = useMemo(() => {
+    if (latestBiometrics?.sleep_hours !== undefined && latestBiometrics?.sleep_hours !== null) {
+      const n = Number(latestBiometrics.sleep_hours);
+      if (!isNaN(n) && n > 0) return roundOne(n);
+    }
+    if (analytics?.sleep_hours !== undefined && analytics?.sleep_hours !== null) {
+      const n = Number(analytics.sleep_hours);
+      if (!isNaN(n) && n > 0) return roundOne(n);
+    }
+    if (analytics?.avg_sleep !== undefined && analytics?.avg_sleep !== null) {
+      const n = Number(analytics.avg_sleep);
+      if (!isNaN(n) && n > 0) return roundOne(n);
+    }
+    return null;
+  }, [analytics?.sleep_hours, analytics?.avg_sleep, latestBiometrics]);
 
-  // Clinical PDF Export Pipeline
+  const totalAssessments = analytics?.total_assessments ?? 0;
+
+  // 7-Day Stress & Sleep metrics for Monday - Sunday (active fill ONLY when logged)
+  const weeklyMetrics = useMemo(() => {
+    return computeWeeklyStressTrend(analytics?.history, displayMoodLogs, latestBiometrics);
+  }, [analytics?.history, displayMoodLogs, latestBiometrics]);
+
+  // Real-time Mood Distribution computed from logs
+  const moodDistribution = useMemo(() => {
+    if (!displayMoodLogs || displayMoodLogs.length === 0) return [];
+    const countMap = {};
+    displayMoodLogs.forEach((log) => {
+      const m = log.mood || 'Reflection';
+      countMap[m] = (countMap[m] || 0) + 1;
+    });
+    const total = displayMoodLogs.length;
+    const moodColors = {
+      Great: '#0D9488',
+      Good: '#14B8A6',
+      Calm: '#0D9488',
+      Reflective: '#0F766E',
+      Okay: '#64748B',
+      Bad: '#F59E0B',
+      Terrible: '#DC2626',
+      Overwhelmed: '#DC2626',
+      Anxious: '#F97316',
+    };
+    return Object.keys(countMap)
+      .map((name) => ({
+        name,
+        count: countMap[name],
+        pct: Math.round((countMap[name] / total) * 100),
+        color: moodColors[name] || '#0D9488',
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+  }, [displayMoodLogs]);
+
+  // Common Stress Factors
+  const stressFactorsList = useMemo(() => {
+    const rawFactors = journalSummary?.stress_factors || journalSummary?.top_triggers;
+    if (rawFactors && Array.isArray(rawFactors) && rawFactors.length > 0) {
+      const total = rawFactors.reduce((acc, f) => acc + (f.count || 1), 0);
+      return rawFactors.slice(0, 4).map((f) => ({
+        name: f.category || f.name || 'Workload Tension',
+        count: f.count || 1,
+        pct: total > 0 ? Math.round(((f.count || 1) / total) * 100) : 50,
+      }));
+    }
+
+    const counts = {};
+    (displayMoodLogs || []).forEach((log) => {
+      const list = Array.isArray(log.stress_factors)
+        ? log.stress_factors
+        : log.stress_factor && log.stress_factor !== 'None'
+        ? [log.stress_factor]
+        : [];
+      list.forEach((t) => {
+        if (t && t !== 'None') {
+          counts[t] = (counts[t] || 0) + 1;
+        }
+      });
+    });
+
+    const entries = Object.keys(counts);
+    if (entries.length === 0) return [];
+    const total = entries.reduce((acc, k) => acc + counts[k], 0);
+    return entries
+      .map((name) => ({
+        name,
+        count: counts[name],
+        pct: total > 0 ? Math.round((counts[name] / total) * 100) : 50,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+  }, [journalSummary, displayMoodLogs]);
+
+  // Hybrid Agent + Clinical Rule-Based Recommendations Engine
+  const recommendations = useMemo(() => {
+    const candidates = [];
+    const sleepVal = rawAvgSleep !== null ? rawAvgSleep : (analytics?.avg_sleep ? Number(analytics.avg_sleep) : 0);
+    const stressVal = rawAvgStress !== null ? rawAvgStress : (analytics?.avg_stress ? Number(analytics.avg_stress) : 0);
+
+    // 1. Stress-Level Rule
+    if (stressVal >= 6.5) {
+      candidates.push({
+        id: 'stress-high-alert',
+        title: 'Immediate Autonomic Reset',
+        desc: 'Elevated cognitive tension detected. A 2-minute physiological sigh or box breathing cycle rapidly down-regulates sympathetic hyperarousal.',
+        icon: 'Wind',
+        actionText: 'Start 2m Reset',
+        route: 'Relax',
+        priority: 10,
+      });
+    } else if (stressVal >= 4.0) {
+      candidates.push({
+        id: 'stress-moderate',
+        title: 'Parasympathetic Centering',
+        desc: 'Moderate tension observed. Taking an intentional 2-minute breathwork pause clears working memory and stabilizes cognitive endurance.',
+        icon: 'Wind',
+        actionText: 'Mindful Pause',
+        route: 'Relax',
+        priority: 7,
+      });
+    }
+
+    // 2. Sleep Hygiene Rule
+    if (sleepVal > 0 && sleepVal < 7.0) {
+      candidates.push({
+        id: 'sleep-hygiene',
+        title: 'Circadian Wind-Down',
+        desc: `Your recent average sleep is ${sleepVal.toFixed(1)}h, below the recommended 7.5h restorative window. Setting a 30-minute electronic curfew before bed protects cognitive stamina.`,
+        icon: 'Moon',
+        actionText: 'Relaxation Reset',
+        route: 'Relax',
+        priority: 8,
+      });
+    }
+
+    // 3. Trigger-Aware Pacing Rule
+    const primaryTrigger =
+      stressFactorsList.length > 0 ? stressFactorsList[0].name : analytics?.common_trigger || 'General Academic Studies';
+    const isAcademic = isAcademicTrigger(primaryTrigger);
+
+    if (isAcademic) {
+      candidates.push({
+        id: 'academic-pacing',
+        title: 'Stress-Adapted Study Pacing',
+        desc: 'Protect working memory from cognitive overload. Pair 25m or 45m focus blocks with 5m or 10m neural reset breaks to maintain deep focus.',
+        icon: 'GraduationCap',
+        actionText: 'Open Study Track',
+        route: 'AplusTrack',
+        priority: 6,
+      });
+    } else {
+      candidates.push({
+        id: 'priority-planning',
+        title: 'Structured Priority Planning',
+        desc: 'Break financial or personal tasks into small, scheduled 20-minute planning check-ins to reduce mental overwhelm and restore emotional clarity.',
+        icon: 'MessageCircle',
+        actionText: 'Open MindCare Chat',
+        route: 'Chat',
+        priority: 6,
+      });
+    }
+
+    // 4. Activity Engagement Rule (Surface when sessions are zero)
+    if (activityStats.relaxSessions === 0) {
+      candidates.push({
+        id: 'engagement-relax',
+        title: 'Initiate Mindful Decompression',
+        desc: 'Take your first guided 2-minute breathing cycle to establish your personal autonomic regulation baseline.',
+        icon: 'Wind',
+        actionText: 'Start Breathing',
+        route: 'Relax',
+        priority: 5,
+      });
+    } else if (activityStats.studySessions === 0) {
+      candidates.push({
+        id: 'engagement-study',
+        title: 'Initial Focus Block',
+        desc: 'Complete your first structured study session on your syllabus topics to build steady academic pacing without cognitive fatigue.',
+        icon: 'GraduationCap',
+        actionText: 'Open Study Track',
+        route: 'AplusTrack',
+        priority: 4,
+      });
+    }
+
+    // 5. Backend Recommendations Ingestion (Merge any agent recommendations from backend)
+    const backendRecs = analytics?.recommendations || analytics?.ai_recommendations;
+    if (Array.isArray(backendRecs) && backendRecs.length > 0) {
+      backendRecs.forEach((r, idx) => {
+        if (!r) return;
+        const rawTitle = typeof r === 'string' ? 'Clinical Insight' : (r.title || 'Wellness Protocol');
+        const cleanTitle = rawTitle.replace(/\bAI\b/gi, 'MindCare').replace(/gemini/gi, 'MindCare').trim();
+        const rawDesc = typeof r === 'string' ? r : (r.desc || r.description || '');
+        const cleanDesc = rawDesc
+          .replace(/\bAI-generated\b/gi, 'Evidence-based')
+          .replace(/\bAI\b/gi, 'clinical')
+          .replace(/gemini/gi, 'MindCare')
+          .trim();
+
+        if (cleanDesc) {
+          candidates.push({
+            id: `backend-rec-${idx}`,
+            title: cleanTitle,
+            desc: cleanDesc,
+            icon: r.icon === 'Moon' ? 'Moon' : r.icon === 'Clock' ? 'GraduationCap' : 'Heart',
+            actionText: r.actionText || 'Explore Guideline',
+            route: r.route || (r.icon === 'Moon' || r.icon === 'Wind' ? 'Relax' : 'AplusTrack'),
+            priority: 3,
+          });
+        }
+      });
+    }
+
+    // 6. Default Fallback if candidates is empty
+    if (candidates.length === 0) {
+      candidates.push({
+        id: 'calm-baseline',
+        title: 'Parasympathetic Centering',
+        desc: 'Your stress markers indicate a steady, balanced state. Taking intentional 2-minute breathwork pauses sustains mental clarity throughout the day.',
+        icon: 'Heart',
+        actionText: 'Mindful Pause',
+        route: 'Relax',
+        priority: 1,
+      });
+    }
+
+    // Deduplicate by title prefix and sort by priority descending
+    const seenTitles = new Set();
+    const unique = [];
+    candidates
+      .sort((a, b) => (b.priority || 0) - (a.priority || 0))
+      .forEach((item) => {
+        const key = item.title.toLowerCase().slice(0, 14);
+        if (!seenTitles.has(key)) {
+          seenTitles.add(key);
+          unique.push(item);
+        }
+      });
+
+    // Cap strictly at top 3 cards without repeating "AI" buzzwords
+    return unique.slice(0, 3);
+  }, [rawAvgSleep, rawAvgStress, stressFactorsList, analytics, activityStats]);
+
+  // Direct PDF Export Pipeline with Android FileProvider URI Fix
   const handleExportPDF = async () => {
     if (isExporting) return;
     try {
       setIsExporting(true);
 
-      const dynamicStress = analytics?.avg_stress !== undefined && analytics?.avg_stress !== null
-        ? Number(analytics.avg_stress)
-        : 4.1;
-
-      const topTriggerItem = analyticsData.stress_factors && analyticsData.stress_factors.length > 0
-        ? analyticsData.stress_factors[0]
-        : null;
-
-      const primaryTrigger = topTriggerItem
-        ? topTriggerItem.category
-        : (analytics?.common_trigger || 'Academic Workload');
-
-      const triggerPercentage = topTriggerItem
-        ? `${topTriggerItem.count} ${topTriggerItem.count === 1 ? 'entry' : 'entries'}`
-        : (analytics?.trigger_percentage || '40%');
+      const dynamicStress = rawAvgStress !== null ? rawAvgStress : 4.1;
+      const primaryTrigger =
+        stressFactorsList.length > 0 ? stressFactorsList[0].name : analytics?.common_trigger || 'General Academic Studies';
+      const triggerPercentage =
+        stressFactorsList.length > 0
+          ? `${stressFactorsList[0].pct}%`
+          : analytics?.trigger_percentage || '40%';
 
       const combinedData = {
         ...analytics,
-        user_name: analytics?.user_name || 'Student',
+        user_name: userName || analytics?.user_name || 'Student',
         patient_id: analytics?.patient_id || 'MC-10492',
         avg_stress: dynamicStress,
-        avg_sleep: latestBiometrics?.sleep_hours ?? analytics?.sleep_hours ?? analytics?.avg_sleep ?? 7.0,
+        avg_sleep: rawAvgSleep ?? 7.0,
         study_hours: analytics?.study_hours ?? 5.5,
         common_trigger: primaryTrigger,
+        primary_stress_vector: primaryTrigger,
         trigger_percentage: triggerPercentage,
         variance: analytics?.variance ?? 0,
         is_baseline: analytics?.is_baseline ?? true,
         recent_mood_logs: displayMoodLogs,
+        weekly_metrics: weeklyMetrics,
+        mood_distribution: moodDistribution,
+        stress_factors: stressFactorsList,
+        activity_stats: activityStats,
         activity_summary: {
           mood_count: displayMoodLogs?.length ?? (analytics?.total_entries ?? 0),
           support_count: analytics?.total_chats ?? 0,
-          assessment_count: analytics?.total_assessments ?? 0,
-          relaxation_count: analytics?.total_relaxations ?? 0,
-        }
+          assessment_count: totalAssessments,
+          relaxation_count: activityStats.relaxSessions || (analytics?.total_relaxations ?? 0),
+          relaxation_minutes: activityStats.relaxMinutes || (activityStats.relaxSessions * 2),
+          study_sessions: activityStats.studySessions || 0,
+          study_minutes: activityStats.studyMinutes || (activityStats.studySessions * 25),
+        },
       };
 
-      const htmlContent = generateClinicalHTMLReport(combinedData);
-      await Print.printAsync({ html: htmlContent });
+      const html = generateClinicalHTMLReport(combinedData);
+      const { uri } = await Print.printToFileAsync({ html });
+
+      // Copy the generated PDF to a clean, shareable cache URI with an explicit .pdf extension
+      const fileName = `MindCare_Wellness_Report_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const targetUri = `${FileSystem.cacheDirectory}${fileName}`;
+      await FileSystem.copyAsync({ from: uri, to: targetUri });
+
+      try {
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(targetUri, {
+            mimeType: 'application/pdf',
+            dialogTitle: 'Export MindCare Clinical Wellness Report',
+            UTI: 'com.adobe.pdf',
+          });
+        } else {
+          await Print.printAsync({ html });
+        }
+      } catch (shareErr) {
+        await Print.printAsync({ html });
+      }
     } catch (error) {
       const msg = error?.message || '';
       if (!msg.toLowerCase().includes('cancel') && !msg.toLowerCase().includes('dismiss')) {
-        console.warn('PDF Generation Error:', error);
-        Alert.alert('Export Error', 'Unable to generate PDF report: ' + msg);
+        console.warn('PDF export notice:', error);
+        Alert.alert('Export Notice', 'Unable to complete PDF export: ' + msg);
       }
     } finally {
       setIsExporting(false);
@@ -338,723 +541,971 @@ const AnalyticsScreen = ({ navigation }) => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" translucent backgroundColor="transparent" />
-
-      <ScrollView
-        contentContainerStyle={styles.scrollContainer}
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#0D9488" />
-        }
-      >
-        {/* Header with Export Action */}
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#EDF5F4" translucent={false} />
+      {/* Signature Ambient Translucent Mint-Teal & Soft Aqua Background Circles */}
+      <View pointerEvents="none" style={styles.ambientOrbTop} />
+      <View pointerEvents="none" style={styles.ambientOrbMiddle} />
+      <View pointerEvents="none" style={styles.ambientOrbBottom} />
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+        {/* 1. Header with Direct Export PDF Action */}
         <View style={styles.header}>
-          <View style={styles.headerRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.headerTitle}>Clinical Analytics</Text>
-              <Text style={styles.headerSubtitle}>Self-Reflection & Clinical Wellness Trends</Text>
-            </View>
-            <TouchableOpacity
-              style={styles.exportBtn}
-              onPress={handleExportPDF}
-              disabled={isExporting}
-              activeOpacity={0.8}
-            >
-              {isExporting ? (
-                <ActivityIndicator size="small" color="#0D9488" style={{ marginRight: 6 }} />
-              ) : (
-                <Download color="#0D9488" size={16} style={{ marginRight: 6 }} />
-              )}
-              <Text style={styles.exportBtnText}>{isExporting ? 'Exporting...' : 'Export PDF'}</Text>
-            </TouchableOpacity>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerTitle}>Wellness Analytics</Text>
+            <Text style={styles.headerSubtitle}>Longitudinal mood, sleep & resilience trends</Text>
           </View>
+
+          <TouchableOpacity
+            style={styles.exportPillBtn}
+            onPress={handleExportPDF}
+            disabled={isExporting}
+            activeOpacity={0.8}
+            accessibilityLabel="Export Clinical PDF Report"
+          >
+            {isExporting ? (
+              <ActivityIndicator size="small" color="#0D9488" style={{ marginRight: 5 }} />
+            ) : (
+              <Download size={14} color="#0D9488" strokeWidth={2.5} style={{ marginRight: 5 }} />
+            )}
+            <Text style={styles.exportPillText}>{isExporting ? 'Exporting...' : 'Export PDF'}</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Loading progress bar indicator (non-blocking) */}
-        {loading && !analytics && (
-          <View style={styles.loadingBanner}>
-            <ActivityIndicator size="small" color="#0D9488" />
-            <Text style={styles.loadingBannerText}>Updating clinical insights...</Text>
-          </View>
-        )}
-
-        {/* Stats Summary Cards */}
-        <View style={styles.statsRow}>
-          <View style={styles.card}>
-            <View style={styles.iconCircle}>
-              <TrendingDown size={18} color="#0D9488" />
-            </View>
-            <Text style={styles.cardLabel}>7-DAY AVERAGE STRESS</Text>
-            <Text style={styles.cardValue}>
-              {analytics?.avg_stress !== undefined && analytics?.avg_stress !== null && !isNaN(Number(analytics?.avg_stress))
-                ? `${Number(analytics.avg_stress).toFixed(1)}/10`
-                : '4.1/10'}
-            </Text>
-            <Text
-              style={[
-                styles.cardSubText,
-                { color: analytics?.avg_stress > 7 ? '#EF4444' : '#10B981' },
-              ]}
-            >
-              {analytics?.avg_stress > 7 ? 'Elevated Range' : 'Balanced Range'}
-            </Text>
-          </View>
-
-          <View style={styles.card}>
-            <View style={[styles.iconCircle, { backgroundColor: '#F0FDFA' }]}>
-              <Calendar size={18} color="#0D9488" />
-            </View>
-            <Text style={styles.cardLabel}>TOTAL ASSESSMENTS</Text>
-            <Text style={styles.cardValue}>{analytics?.total_assessments ?? 0}</Text>
-            <Text style={[styles.cardSubText, { color: '#0D9488' }]}>Logged evaluations</Text>
-          </View>
-        </View>
-
-        {/* Weekly Resilience Index Chart */}
-        <View style={styles.whiteCard}>
-          <Text style={styles.cardTitle}>Assessment Progress Patterns</Text>
-          <Text style={styles.cardSub}>Aggregated longitudinal stress balance</Text>
-          <View style={styles.chartContainer}>
-            {dynamicWeeklyTrend.map((item, index) => (
-              <View key={index} style={styles.chartBarWrapper}>
-                <View
-                  style={[
-                    styles.chartBar,
-                    {
-                      height: item.val,
-                      backgroundColor: item.val > 65 ? '#0D9488' : '#99F6E4',
-                      opacity: item.val <= 12 ? 0.35 : 1,
-                    },
-                  ]}
-                />
-                <Text style={styles.chartDayText}>{item.day}</Text>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#0D9488']} />
+          }
+        >
+          {/* Visual Hero Banner: tool-analytics.jpg with Subtle Bottom Scrim */}
+          <View style={styles.heroBannerCard}>
+            <Image
+              source={require('../../assets/images/tool-analytics.jpg')}
+              style={styles.heroBannerImg}
+              resizeMode="cover"
+            />
+            <View style={styles.heroBannerBottomScrim}>
+              <View style={styles.heroTagPill}>
+                <Text style={styles.heroTagPillText}>CLINICAL OVERVIEW</Text>
               </View>
-            ))}
+              <Text style={styles.heroTitleText}>Your Holistic Wellbeing</Text>
+              <Text style={styles.heroSubText}>
+                Evidence-based longitudinal tracking of autonomic tone, rest & focus
+              </Text>
+            </View>
           </View>
-        </View>
 
-        {/* Mood & Lifestyle Tracking Section Divider & Header */}
-        <View style={styles.sectionDividerWrap}>
-          <View style={styles.sectionDividerLine} />
-          <View style={styles.sectionTitleBlock}>
-            <Text style={styles.sectionMainTitle}>Mood & Lifestyle Tracking</Text>
-            <Text style={styles.sectionMainSubtitle}>
-              Daily affect, energy, sleep & trigger patterns
-            </Text>
+          {/* 2. 3-Card Core Snapshot Row (Clean typography without decorative icon boxes) */}
+          <View style={styles.snapshotRow}>
+            {/* Card 1: Avg. Stress */}
+            <View style={styles.snapshotCard}>
+              <Text style={styles.snapshotLabel}>AVG. STRESS</Text>
+              <Text style={styles.snapshotValue}>
+                {rawAvgStress !== null ? `${rawAvgStress.toFixed(1)}/10` : '--'}
+              </Text>
+              <View
+                style={[
+                  styles.snapshotStatusBadge,
+                  rawAvgStress !== null && rawAvgStress >= 6.5
+                    ? styles.badgeElevated
+                    : rawAvgStress !== null && rawAvgStress >= 4.0
+                    ? styles.badgeWarning
+                    : styles.badgeCalm,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.snapshotStatusText,
+                    rawAvgStress !== null && rawAvgStress >= 6.5
+                      ? { color: '#DC2626' }
+                      : rawAvgStress !== null && rawAvgStress >= 4.0
+                      ? { color: '#B45309' }
+                      : { color: '#0F766E' },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {rawAvgStress === null
+                    ? 'No Logs'
+                    : rawAvgStress >= 6.5
+                    ? 'High Alert'
+                    : rawAvgStress >= 4.0
+                    ? 'Moderate'
+                    : 'Calm'}
+                </Text>
+              </View>
+            </View>
+
+            {/* Card 2: Avg. Sleep */}
+            <View style={styles.snapshotCard}>
+              <Text style={styles.snapshotLabel}>AVG. SLEEP</Text>
+              <Text style={styles.snapshotValue}>
+                {rawAvgSleep !== null ? `${rawAvgSleep.toFixed(1)}h` : '--'}
+              </Text>
+              <View
+                style={[
+                  styles.snapshotStatusBadge,
+                  rawAvgSleep !== null && rawAvgSleep < 7.0
+                    ? styles.badgeWarning
+                    : styles.badgeCalm,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.snapshotStatusText,
+                    rawAvgSleep !== null && rawAvgSleep < 7.0
+                      ? { color: '#B45309' }
+                      : { color: '#0F766E' },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {rawAvgSleep === null
+                    ? 'No Logs'
+                    : rawAvgSleep >= 7.0
+                    ? 'Optimal'
+                    : 'Needs Rest'}
+                </Text>
+              </View>
+            </View>
+
+            {/* Card 3: Assessments */}
+            <View style={styles.snapshotCard}>
+              <Text style={styles.snapshotLabel}>ASSESSMENTS</Text>
+              <Text style={styles.snapshotValue}>{totalAssessments}</Text>
+              <View style={[styles.snapshotStatusBadge, styles.badgeCalm]}>
+                <Text style={[styles.snapshotStatusText, { color: '#0F766E' }]} numberOfLines={1}>
+                  {totalAssessments > 0 ? 'Evaluations' : 'None Yet'}
+                </Text>
+              </View>
+            </View>
           </View>
-        </View>
 
-        {/* Recent Mood Records Section */}
-        <View style={styles.moodSectionContainer}>
-          <Text style={styles.sectionTitle}>Self-Reflection Logs</Text>
-          {displayMoodLogs && displayMoodLogs.length > 0 ? (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.moodScrollContainer}
-            >
-              {displayMoodLogs.map((log, idx) => {
-                const energyLabel = log.energy_level ? `${log.energy_level} Energy` : 'Steady Energy';
+          {/* 3. Dual Pure-View Analytics Charts */}
+          {/* Chart 1: 7-Day Stress Trend */}
+          <View style={styles.whiteCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardSectionTitle}>7-Day Stress Trend</Text>
+                <Text style={styles.cardSectionSubtitle}>
+                  Daily autonomic & perceived stress indicators (Mon–Sun)
+                </Text>
+              </View>
+              <View style={styles.legendRow}>
+                <View style={[styles.legendDot, { backgroundColor: '#0D9488' }]} />
+                <Text style={styles.legendText}>Calm</Text>
+                <View style={[styles.legendDot, { backgroundColor: '#D97706', marginLeft: 6 }]} />
+                <Text style={styles.legendText}>Moderate</Text>
+                <View style={[styles.legendDot, { backgroundColor: '#DC2626', marginLeft: 6 }]} />
+                <Text style={styles.legendText}>High Alert</Text>
+              </View>
+            </View>
 
-                const rawDate = log.date || log.timestamp;
-                const dateStr = rawDate
-                  ? new Date(rawDate.split('.')[0].replace('Z', '')).toLocaleDateString('en-US', {
-                      month: 'short',
-                      day: 'numeric',
-                    })
-                  : 'Today';
-
-                const emotionLabel =
-                  log.emotion_tags && Array.isArray(log.emotion_tags) && log.emotion_tags.length > 0
-                    ? log.emotion_tags[0]
-                    : null;
-
-                const subtitle = emotionLabel ? `${emotionLabel} • ${dateStr}` : dateStr;
+            <View style={styles.stressChartContainer}>
+              {weeklyMetrics.map((item, idx) => {
+                const fillHeight = item.hasStress
+                  ? Math.max(10, Math.min(64, (item.stressScore / 10) * 64))
+                  : 0;
+                const isHighAlert = item.hasStress && item.stressScore >= 6.5;
+                const isModerate = item.hasStress && item.stressScore >= 4.0;
+                const barColor = isHighAlert ? '#DC2626' : isModerate ? '#D97706' : '#0D9488';
 
                 return (
-                  <View key={idx} style={styles.moodCard}>
-                    <View style={styles.moodHeaderRow}>
-                      <Heart size={18} color="#0D9488" />
-                      <View
-                        style={[
-                          styles.moodStressTag,
-                          {
-                            backgroundColor: 'rgba(13, 148, 136, 0.12)',
-                            borderColor: '#CCFBF1',
-                            borderWidth: 1,
-                          },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.moodStressTagText,
-                            { color: '#0D9488' },
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {energyLabel}
-                        </Text>
-                      </View>
-                    </View>
-                    <Text style={styles.moodNameText} numberOfLines={1}>
-                      {log.mood || 'Reflection'}
-                    </Text>
-                    <Text style={styles.moodDateText} numberOfLines={1}>
-                      {subtitle}
-                    </Text>
-                    {log.sleep_hours !== undefined && log.sleep_hours !== null && (
-                      <View style={styles.moodMetaFooterRow}>
-                        <View style={styles.moodMetaChip}>
-                          <Text style={styles.moodMetaChipText}>
-                            {typeof log.sleep_hours === 'number' ? log.sleep_hours.toFixed(1) : log.sleep_hours}h rest
-                          </Text>
-                        </View>
-                        {log.stress_factors && Array.isArray(log.stress_factors) && log.stress_factors.length > 0 && log.stress_factors[0] !== 'None' && (
-                          <View style={[styles.moodMetaChip, { backgroundColor: '#F1F5F9', borderColor: '#E2E8F0' }]}>
-                            <Text style={[styles.moodMetaChipText, { color: '#475569' }]} numberOfLines={1}>
-                              {log.stress_factors[0]}
-                            </Text>
-                          </View>
-                        )}
-                      </View>
+                  <View key={idx} style={styles.chartCol}>
+                    {item.hasStress ? (
+                      <Text style={[styles.barScoreLabel, { color: barColor }]}>
+                        {item.stressScore.toFixed(1)}
+                      </Text>
+                    ) : (
+                      <Text style={styles.barEmptyLabel}>-</Text>
                     )}
+
+                    {/* Background Capsule Track (height: 64) */}
+                    <View style={styles.capsuleTrack}>
+                      {item.hasStress ? (
+                        <View
+                          style={[
+                            styles.capsuleFill,
+                            {
+                              height: fillHeight,
+                              backgroundColor: barColor,
+                            },
+                          ]}
+                        />
+                      ) : null}
+                    </View>
+
+                    <Text style={styles.dayLabelText}>{item.day}</Text>
                   </View>
                 );
               })}
-            </ScrollView>
-          ) : (
-            <View style={styles.emptyMoodCard}>
-              <Text style={styles.emptyMoodText}>No self-reflection mood logs recorded yet.</Text>
-            </View>
-          )}
-        </View>
-
-        {/* Mood & Trigger Insights */}
-        <View style={styles.whiteCard}>
-          <View style={styles.journalSummaryHeader}>
-            <View style={styles.journalIconCircle}>
-              <BookOpen size={18} color="#0D9488" />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Mood & Trigger Insights</Text>
-              <Text style={styles.cardSub}>Longitudinal emotional themes & stress triggers</Text>
             </View>
           </View>
 
-          {analyticsData.total_entries === 0 && (!analyticsData.emotions || analyticsData.emotions.length === 0) ? (
-            <View style={styles.emptyJournalState}>
-              <Text style={styles.emptyJournalStateText}>
-                No mood check-ins or reflection logs recorded yet.
-              </Text>
+          {/* Chart 2: 7-Day Sleep & Mood Distribution */}
+          <View style={styles.whiteCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardSectionTitle}>Sleep & Mood Distribution</Text>
+                <Text style={styles.cardSectionSubtitle}>
+                  Rest duration against target reference & affect breakdown
+                </Text>
+              </View>
+              <View style={styles.targetPill}>
+                <Text style={styles.targetPillText}>Target: 7.5h</Text>
+              </View>
             </View>
-          ) : (
-            <View style={styles.emotionsSection}>
-              {/* EMOTIONAL REFLECTION PATTERNS */}
-              {analyticsData.emotions && analyticsData.emotions.length > 0 && (
-                <>
-                  <Text style={styles.subSectionTitle}>EMOTIONAL REFLECTION PATTERNS</Text>
-                  {analyticsData.emotions.map((item, index) => (
-                    <View key={index} style={styles.emotionProgressRow}>
-                      <View style={styles.emotionLabelRow}>
-                        <Text style={styles.emotionLabelText}>{item.name}</Text>
-                        <Text style={styles.emotionPercentText}>{item.percentage}% ({item.count} logs)</Text>
+
+            {/* Daily Sleep Mini-Bars */}
+            <View style={styles.sleepSubSection}>
+              <Text style={styles.subHeaderLabel}>DAILY SLEEP DURATION</Text>
+              <View style={styles.sleepChartContainer}>
+                {weeklyMetrics.map((item, idx) => {
+                  const sHeight = item.hasSleep
+                    ? Math.max(8, Math.min(52, (item.sleepHours / 10) * 52))
+                    : 0;
+                  const isOptimalSleep = item.hasSleep && item.sleepHours >= 7.0;
+
+                  return (
+                    <View key={idx} style={styles.sleepCol}>
+                      {item.hasSleep ? (
+                        <Text style={styles.sleepBarValText}>{item.sleepHours.toFixed(1)}h</Text>
+                      ) : (
+                        <Text style={styles.sleepBarValText}>-</Text>
+                      )}
+                      <View style={styles.sleepTrack}>
+                        {item.hasSleep ? (
+                          <View
+                            style={[
+                              styles.sleepFill,
+                              {
+                                height: sHeight,
+                                backgroundColor: isOptimalSleep ? '#0D9488' : '#D97706',
+                              },
+                            ]}
+                          />
+                        ) : null}
                       </View>
-                      <View style={styles.emotionProgressBarTrack}>
-                        <View 
+                      <Text style={styles.dayLabelText}>{item.day}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* Horizontal Mood Distribution Bars */}
+            <View style={styles.moodSubSection}>
+              <Text style={styles.subHeaderLabel}>MOOD DISTRIBUTION</Text>
+              {moodDistribution.length > 0 ? (
+                <View style={styles.moodBarsList}>
+                  {moodDistribution.map((m, index) => (
+                    <View key={index} style={styles.moodBarRow}>
+                      <View style={styles.moodBarTextRow}>
+                        <Text style={styles.moodBarName}>{m.name}</Text>
+                        <Text style={styles.moodBarCount}>
+                          {m.pct}% ({m.count} {m.count === 1 ? 'log' : 'logs'})
+                        </Text>
+                      </View>
+                      <View style={styles.progressTrack}>
+                        <View
                           style={[
-                            styles.emotionProgressBarFill, 
-                            { 
-                              width: `${item.percentage}%`,
-                              backgroundColor: index === 0 ? '#0D9488' : index === 1 ? '#0F766E' : index === 2 ? '#14B8A6' : '#5EEAD4'
-                            }
-                          ]} 
+                            styles.progressFill,
+                            { width: `${m.pct}%`, backgroundColor: m.color },
+                          ]}
                         />
                       </View>
                     </View>
                   ))}
-                </>
-              )}
-
-              {/* COMMON STRESS FACTORS */}
-              {analyticsData.stress_factors && analyticsData.stress_factors.length > 0 && (
-                <View style={styles.triggersSection}>
-                  <Text style={styles.subSectionTitle}>COMMON STRESS FACTORS</Text>
-                  <View style={styles.triggersBadgeWrap}>
-                    {analyticsData.stress_factors.map((item, idx) => (
-                      <View key={idx} style={styles.triggerBadgeItem}>
-                        <AlertCircle size={13} color="#0F766E" />
-                        <Text style={styles.triggerBadgeText}>
-                          {item.category} ({item.count} {item.count === 1 ? 'entry' : 'entries'})
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
+                </View>
+              ) : (
+                <View style={styles.emptyMoodBlock}>
+                  <Text style={styles.emptyMoodBlockText}>
+                    Log moods to unlock mood breakdown
+                  </Text>
                 </View>
               )}
+            </View>
+          </View>
 
-              {/* Self-Reflection Balance (Warm clinical phrasing without raw NLP numbers) */}
-              <View style={styles.sentimentIndexRow}>
-                <Text style={styles.sentimentIndexLabel}>Self-Reflection Balance:</Text>
-                <Text style={[styles.sentimentIndexValue, { color: '#0D9488' }]}>
-                  {analyticsData.avg_sentiment > 0.2
-                    ? 'Positive Adaptive Balance'
-                    : analyticsData.avg_sentiment < -0.2
-                    ? 'Elevated Stress State'
-                    : 'Balanced Equilibrium'}
+          {/* 4. Common Stress Factors */}
+          <View style={styles.whiteCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardSectionTitle}>Common Stress Factors</Text>
+                <Text style={styles.cardSectionSubtitle}>
+                  Logged academic, workload & cognitive triggers
                 </Text>
               </View>
+              <View style={styles.triggerAlertBadge}>
+                <AlertCircle size={12} color="#0F766E" />
+                <Text style={styles.triggerAlertBadgeText}>Observed Triggers</Text>
+              </View>
             </View>
-          )}
-        </View>
 
-        {/* Unified Holistic Wellness Index Chart */}
-        <View style={styles.holisticCard}>
-          <View style={styles.holisticHeaderRow}>
-            <View style={styles.holisticIconCircle}>
-              <Activity size={18} color="#0D9488" />
-            </View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={styles.cardTitle}>Holistic Wellness Index</Text>
-              <Text style={styles.cardSub}>Combined daily score from Assessments, Mood, Sleep & Self-Care</Text>
-            </View>
-            {analytics?.avg_wellness_index !== undefined && (
-              <View style={styles.holisticAvgBadge}>
-                <Text style={styles.holisticAvgBadgeText}>{Math.round(analytics.avg_wellness_index)}/100</Text>
+            {stressFactorsList.length > 0 ? (
+              <View style={styles.triggersList}>
+                {stressFactorsList.map((factor, index) => (
+                  <View key={index} style={styles.triggerBarRow}>
+                    <View style={styles.triggerLabelRow}>
+                      <Text style={styles.triggerNameText}>{factor.name}</Text>
+                      <Text style={styles.triggerCountText}>
+                        {factor.count} {factor.count === 1 ? 'entry' : 'entries'} ({factor.pct}%)
+                      </Text>
+                    </View>
+                    <View style={styles.progressTrack}>
+                      <View
+                        style={[
+                          styles.progressFill,
+                          {
+                            width: `${Math.min(100, Math.max(12, factor.pct))}%`,
+                            backgroundColor: index === 0 ? '#0D9488' : '#14B8A6',
+                          },
+                        ]}
+                      />
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.emptyTriggersBlock}>
+                <Text style={styles.emptyTriggersText}>
+                  No active stress triggers reported yet. Check in daily to track recurring pressure points.
+                </Text>
               </View>
             )}
           </View>
 
-          <View style={styles.chartContainer}>
-            {holisticTrend.map((item, index) => {
-              const barHeight = Math.max(14, Math.min(100, item.val));
-              const hasData = item.has_data !== false && item.val > 14;
-              return (
-                <View key={index} style={styles.chartBarWrapper}>
-                  {hasData && (
-                    <Text style={styles.holisticBarScoreText}>
-                      {Math.round(item.score || item.val)}
-                    </Text>
-                  )}
-                  <View
-                    style={[
-                      styles.chartBar,
-                      {
-                        height: barHeight,
-                        backgroundColor: '#0D9488',
-                        opacity: hasData ? 1 : 0.28,
-                      },
-                    ]}
-                  />
-                  <Text style={styles.chartDayText}>{item.day}</Text>
-                </View>
-              );
-            })}
-          </View>
-        </View>
-
-        {/* Clinical Insight Card (Warm Heart/Clipboard Icon, No Sparkles) */}
-        <View style={styles.insightCard}>
-          <View style={styles.insightIconCircle}>
-            <Heart size={20} color="#0D9488" />
-          </View>
-          <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={styles.insightTitle}>MindCare Clinical Insight</Text>
-            <Text style={styles.insightDescription}>
-              {analytics?.summary ||
-                'Consistent check-ins and reflection logs help illuminate behavioral recovery patterns.'}
-            </Text>
-          </View>
-        </View>
-
-        {/* Longitudinal Status Card */}
-        <View
-          style={[
-            styles.progressCard,
-            { backgroundColor: analytics?.avg_stress > 7 ? '#EF4444' : '#0D9488' },
-          ]}
-        >
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <View>
-              <Text style={styles.progressLabel}>CLINICAL STATUS</Text>
-              <Text style={styles.progressValue}>
-                {analytics?.avg_stress > 7 ? 'Attention Required' : 'Optimal Balance'}
-              </Text>
+          {/* 5. Personalized Wellness Recommendations */}
+          <View style={styles.whiteCard}>
+            <View style={styles.cardHeaderRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.cardSectionTitle}>Personalized Recommendations</Text>
+                <Text style={styles.cardSectionSubtitle}>
+                  Adaptive self-care routines based on your actual metrics
+                </Text>
+              </View>
             </View>
-            <View style={styles.progressIcon}>
-              <Activity size={22} color="#FFFFFF" />
+
+            <View style={styles.recsList}>
+              {recommendations.map((rec) => {
+                let RecIcon = Heart;
+                if (rec.icon === 'Moon') RecIcon = Moon;
+                else if (rec.icon === 'Wind') RecIcon = Wind;
+                else if (rec.icon === 'GraduationCap') RecIcon = GraduationCap;
+                else if (rec.icon === 'MessageCircle') RecIcon = MessageCircle;
+
+                return (
+                  <View key={rec.id} style={styles.recCard}>
+                    <View style={styles.recIconWrap}>
+                      <RecIcon size={18} color="#0D9488" strokeWidth={2.2} />
+                    </View>
+                    <View style={styles.recContentWrap}>
+                      <Text style={styles.recTitle}>{rec.title}</Text>
+                      <Text style={styles.recDesc}>{rec.desc}</Text>
+                      <TouchableOpacity
+                        style={styles.recActionLink}
+                        onPress={() => navigation.navigate(rec.route)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.recActionLinkText}>{rec.actionText}</Text>
+                        <ChevronRight size={13} color="#0D9488" strokeWidth={2.5} />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              })}
             </View>
           </View>
-          <Text style={styles.progressDescription}>
-            Stress markers are calculated based on your longitudinal self-assessments. Progress index:{' '}
-            {analytics?.monthly_progress || '0%'}
-          </Text>
-        </View>
 
-        {/* Full Report Link */}
-        <TouchableOpacity
-          style={styles.reportRedirectCard}
-          onPress={() => {
-            navigation.navigate('WeeklyReport', {
-              cachedReport: analytics,
-              user_name: analytics?.user_name || 'Student',
-              avg_stress: analytics?.avg_stress,
-            });
-          }}
-          activeOpacity={0.8}
-        >
-          <View style={styles.reportIconCircle}>
-            <FileText color="#0D9488" size={20} />
-          </View>
-          <View style={{ flex: 1, marginLeft: 14 }}>
-            <Text style={styles.reportRedirectTitle}>View Comprehensive Report</Text>
-            <Text style={styles.reportRedirectSub}>
-              Download or share clinical PDF breakdown
-            </Text>
-          </View>
-          <ChevronRight color="#94A3B8" size={20} />
-        </TouchableOpacity>
-      </ScrollView>
-    </SafeAreaView>
+          {/* 6. Sole Clean Bottom Action Button Card: Activity & Module Progress */}
+          <TouchableOpacity
+            style={styles.actionNavCard}
+            onPress={() => navigation.navigate('ActivityProgress')}
+            activeOpacity={0.88}
+            accessibilityLabel="Open Activity & Module Progress"
+          >
+            <View style={styles.actionNavHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.actionNavTitle}>Activity & Module Progress</Text>
+                <Text style={styles.actionNavSubtitle}>
+                  Live relaxation sessions and study blocks
+                </Text>
+              </View>
+              <View style={styles.actionNavBadge}>
+                <Text style={styles.actionNavBadgeText}>
+                  {activityStats.relaxSessions} Relax • {activityStats.studySessions} Study
+                </Text>
+              </View>
+            </View>
+            <View style={styles.actionNavFooter}>
+              <Text style={styles.actionNavFooterText}>View Detailed Progress</Text>
+              <ChevronRight size={15} color="#0D9488" strokeWidth={2.5} />
+            </View>
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
-  scrollContainer: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 96 },
-  header: { marginBottom: 16 },
-  headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  headerTitle: { fontSize: 24, fontWeight: '700', color: '#0F172A', letterSpacing: -0.4 },
-  headerSubtitle: { fontSize: 13, color: '#64748B', marginTop: 2 },
-  exportBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
+  container: {
+    flex: 1,
+    backgroundColor: '#EDF5F4',
   },
-  exportBtnText: {
-    color: '#0D9488',
-    fontWeight: '700',
-    fontSize: 13,
+  safeArea: {
+    flex: 1,
   },
-  loadingBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDFA',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    marginBottom: 14,
-    gap: 8,
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+  // Signature Ambient Background Circles (Matching HomeScreen.js & RelaxScreen.js)
+  ambientOrbTop: {
+    position: 'absolute',
+    top: -50,
+    right: -50,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(45, 212, 191, 0.22)',
   },
-  loadingBannerText: { fontSize: 12, color: '#0F766E', fontWeight: '500' },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 18 },
-  card: {
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 20,
-    width: '48%',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+  ambientOrbMiddle: {
+    position: 'absolute',
+    top: 360,
+    left: -80,
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(20, 184, 166, 0.18)',
   },
-  iconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    backgroundColor: '#F0FDFA',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
+  ambientOrbBottom: {
+    position: 'absolute',
+    bottom: 100,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
   },
-  cardLabel: { fontSize: 10.5, color: '#64748B', fontWeight: '700', letterSpacing: 1.1 },
-  cardValue: { fontSize: 22, fontWeight: '700', color: '#0F172A', marginTop: 2 },
-  cardSubText: { fontSize: 11, fontWeight: '600', marginTop: 4 },
-  whiteCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 20,
-    borderRadius: 20,
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: '#0F172A' },
-  cardSub: { fontSize: 12, color: '#64748B', marginTop: 2, marginBottom: 16 },
-  chartContainer: {
+  header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-end',
-    height: 120,
-    paddingTop: 10,
-    paddingBottom: 4,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
   },
-  chartBarWrapper: { alignItems: 'center', flex: 1 },
-  chartBar: { width: 14, borderRadius: 7 },
-  chartDayText: { fontSize: 11, color: '#64748B', marginTop: 8, fontWeight: '600' },
-  moodSectionContainer: { marginBottom: 18 },
-  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#0F172A', marginBottom: 12 },
-  moodScrollContainer: { paddingRight: 8 },
-  moodCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 14,
-    borderRadius: 16,
+  headerTitleWrap: {
+    flex: 1,
     marginRight: 10,
-    width: 152,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 1,
   },
-  moodHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  moodStressTag: { paddingHorizontal: 7, paddingVertical: 2.5, borderRadius: 8 },
-  moodStressTagText: { fontSize: 10, fontWeight: '700' },
-  moodNameText: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginBottom: 2 },
-  moodDateText: { fontSize: 11, color: '#64748B', fontWeight: '500' },
-  moodMetaFooterRow: {
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#0F172A',
+    letterSpacing: -0.4,
+  },
+  headerSubtitle: {
+    fontSize: 11.5,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '500',
+  },
+  exportPillBtn: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 4,
-    marginTop: 8,
+    alignItems: 'center',
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1.2,
+    borderColor: '#99F6E4',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 14,
   },
-  moodMetaChip: {
+  exportPillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0D9488',
+  },
+  scrollContent: {
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 130,
+  },
+
+  // Hero Banner Card (Bright & Visible with subtle bottom scrim)
+  heroBannerCard: {
+    height: 150,
+    borderRadius: 20,
+    overflow: 'hidden',
+    marginBottom: 16,
+    position: 'relative',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  heroBannerImg: {
+    width: '100%',
+    height: '100%',
+    position: 'absolute',
+  },
+  heroBannerBottomScrim: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.35)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    justifyContent: 'flex-end',
+  },
+  heroTagPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(13, 148, 136, 0.85)',
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 6,
+    marginBottom: 6,
+  },
+  heroTagPillText: {
+    color: '#FFFFFF',
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  heroTitleText: {
+    color: '#FFFFFF',
+    fontSize: 19,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  heroSubText: {
+    color: '#E2E8F0',
+    fontSize: 11.5,
+    lineHeight: 16,
+    marginTop: 3,
+    fontWeight: '500',
+  },
+
+  // 3-Card Core Snapshot Row
+  snapshotRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 16,
+  },
+  snapshotCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderRadius: 18,
+    padding: 12,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  snapshotIconCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  snapshotLabel: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  snapshotValue: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0F172A',
+    letterSpacing: -0.3,
+    marginBottom: 6,
+  },
+  snapshotStatusBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: 6,
+    alignSelf: 'flex-start',
+  },
+  snapshotStatusText: {
+    fontSize: 9.5,
+    fontWeight: '700',
+  },
+  badgeCalm: {
     backgroundColor: '#F0FDFA',
     borderWidth: 1,
     borderColor: '#CCFBF1',
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    maxWidth: 120,
   },
-  moodMetaChipText: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: '#0D9488',
-  },
-  emptyMoodCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 16,
-    alignItems: 'center',
-    borderStyle: 'dashed',
+  badgeElevated: {
+    backgroundColor: '#FEF2F2',
     borderWidth: 1,
-    borderColor: '#CBD5E1',
+    borderColor: '#FEE2E2',
   },
-  emptyMoodText: { fontSize: 13, color: '#64748B' },
+  badgeWarning: {
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FEF3C7',
+  },
 
-  // Section Divider for Mood & Lifestyle Tracking
-  sectionDividerWrap: {
-    marginTop: 6,
+  // White Generic Content Card
+  whiteCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderRadius: 20,
+    padding: 16,
     marginBottom: 16,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#64748B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.07,
+    shadowRadius: 10,
+    elevation: 2,
   },
-  sectionDividerLine: {
-    height: 1,
-    backgroundColor: '#E2E8F0',
+  cardHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
     marginBottom: 14,
   },
-  sectionTitleBlock: {
-    marginBottom: 2,
-  },
-  sectionMainTitle: {
-    fontSize: 18,
-    fontWeight: '700',
+  cardSectionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
     color: '#0F172A',
-    letterSpacing: -0.3,
+    letterSpacing: -0.2,
   },
-  sectionMainSubtitle: {
-    fontSize: 12.5,
+  cardSectionSubtitle: {
+    fontSize: 11.5,
     color: '#64748B',
     marginTop: 2,
   },
+  legendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  legendDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    marginRight: 4,
+  },
+  legendText: {
+    fontSize: 10.5,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  targetPill: {
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  targetPillText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#0D9488',
+  },
 
-  // Holistic Wellness Index Card
-  holisticCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.88)',
-    padding: 18,
-    borderRadius: 24,
-    marginBottom: 18,
+  // 7-Day Stress Bar Chart
+  stressChartContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 106,
+    paddingTop: 8,
+  },
+  chartCol: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  barScoreLabel: {
+    fontSize: 9.5,
+    fontWeight: '700',
+    color: '#0D9488',
+    marginBottom: 4,
+    height: 14,
+  },
+  barEmptyLabel: {
+    fontSize: 9.5,
+    color: '#CBD5E1',
+    marginBottom: 4,
+    height: 14,
+  },
+  capsuleTrack: {
+    width: 24,
+    height: 64,
+    borderRadius: 8,
+    backgroundColor: 'rgba(13, 148, 136, 0.08)',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  capsuleFill: {
+    width: '100%',
+    borderRadius: 8,
+  },
+  dayLabelText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748B',
+    marginTop: 6,
+  },
+
+  // Sleep & Mood Companion Sections
+  sleepSubSection: {
+    marginBottom: 16,
+  },
+  subHeaderLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 0.6,
+    marginBottom: 10,
+  },
+  sleepChartContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    height: 84,
+  },
+  sleepCol: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  sleepBarValText: {
+    fontSize: 8.5,
+    fontWeight: '700',
+    color: '#64748B',
+    marginBottom: 3,
+    height: 12,
+  },
+  sleepTrack: {
+    width: 18,
+    height: 52,
+    borderRadius: 6,
+    backgroundColor: '#F1F5F9',
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  sleepFill: {
+    width: '100%',
+    borderRadius: 6,
+  },
+  moodSubSection: {
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    paddingTop: 14,
+  },
+  moodBarsList: {
+    gap: 10,
+  },
+  moodBarRow: {
+    gap: 4,
+  },
+  moodBarTextRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  moodBarName: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  moodBarCount: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  progressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#F1F5F9',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  emptyMoodBlock: {
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  emptyMoodBlockText: {
+    fontSize: 12,
+    color: '#94A3B8',
+    fontWeight: '500',
+  },
+
+  // Common Stress Factors
+  triggerAlertBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F0FDFA',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+  },
+  triggerAlertBadgeText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#0F766E',
+  },
+  triggersList: {
+    gap: 12,
+  },
+  triggerBarRow: {
+    gap: 4,
+  },
+  triggerLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  triggerNameText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  triggerCountText: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '600',
+  },
+  emptyTriggersBlock: {
+    paddingVertical: 14,
+  },
+  emptyTriggersText: {
+    fontSize: 12,
+    color: '#64748B',
+    lineHeight: 17,
+  },
+
+  // Personalized Recommendations
+  recsList: {
+    gap: 12,
+  },
+  recCard: {
+    flexDirection: 'row',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  recIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: '#F0FDFA',
+    borderWidth: 1,
+    borderColor: '#CCFBF1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  recContentWrap: {
+    flex: 1,
+  },
+  recTitle: {
+    fontSize: 13.5,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 2,
+  },
+  recDesc: {
+    fontSize: 11.5,
+    color: '#475569',
+    lineHeight: 16,
+    marginBottom: 6,
+  },
+  recActionLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  recActionLinkText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#0D9488',
+    marginRight: 2,
+  },
+
+  // Bottom Navigation Action Cards
+  actionNavCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 14,
     borderWidth: 1.5,
     borderColor: '#FFFFFF',
     shadowColor: '#64748B',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
     shadowRadius: 10,
-    elevation: 2,
-  },
-  holisticHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  holisticIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: '#F0FDFA',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  holisticAvgBadge: {
-    backgroundColor: '#F0FDFA',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#99F6E4',
-  },
-  holisticAvgBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#0D9488',
-  },
-  holisticBarScoreText: {
-    fontSize: 9.5,
-    fontWeight: '700',
-    color: '#0D9488',
-    marginBottom: 4,
-  },
-
-  insightCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 18,
-    borderRadius: 20,
-    flexDirection: 'row',
-    marginBottom: 18,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  insightIconCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    backgroundColor: '#F0FDFA',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
-  },
-  insightTitle: { fontWeight: '700', fontSize: 15, color: '#0F172A' },
-  insightDescription: { fontSize: 12.5, color: '#64748B', marginTop: 4, lineHeight: 18 },
-  progressCard: {
-    padding: 20,
-    borderRadius: 20,
-    marginBottom: 18,
-    shadowColor: '#0D9488',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
     elevation: 3,
   },
-  progressLabel: { color: 'rgba(255, 255, 255, 0.85)', fontSize: 11, fontWeight: '700', letterSpacing: 1.1 },
-  progressValue: { color: '#FFFFFF', fontSize: 24, fontWeight: '700', marginTop: 4 },
-  progressIcon: { backgroundColor: 'rgba(255,255,255,0.2)', padding: 10, borderRadius: 12 },
-  progressDescription: { color: 'rgba(255, 255, 255, 0.9)', fontSize: 12.5, marginTop: 10, lineHeight: 18 },
-  reportRedirectCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 20,
+  actionNavHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#64748B',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    marginBottom: 12,
   },
-  reportIconCircle: {
-    width: 44,
-    height: 44,
+  actionNavThumb: {
+    width: 56,
+    height: 56,
     borderRadius: 14,
-    backgroundColor: '#F0FDFA',
+  },
+  actionNavIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#CCFBF1',
   },
-  reportRedirectTitle: { fontWeight: '700', fontSize: 15, color: '#0F172A' },
-  reportRedirectSub: { fontSize: 12, color: '#64748B', marginTop: 2 },
-  journalSummaryHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
-  journalIconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#E6F4F1',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
+  actionNavTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
   },
-  emotionsSection: { marginTop: 4 },
-  subSectionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
+  actionNavSubtitle: {
+    fontSize: 11.5,
     color: '#64748B',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-    marginBottom: 10,
-    marginTop: 6,
+    marginTop: 1,
   },
-  emotionProgressRow: { marginBottom: 12 },
-  emotionLabelRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
-  emotionLabelText: { fontSize: 14, fontWeight: '700', color: '#1E293B' },
-  emotionPercentText: { fontSize: 12, fontWeight: '600', color: '#0D9488' },
-  emotionProgressBarTrack: { height: 8, backgroundColor: '#E2E8F0', borderRadius: 4, overflow: 'hidden' },
-  emotionProgressBarFill: { height: '100%', borderRadius: 4 },
-  triggersSection: { marginTop: 14 },
-  triggersBadgeWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  triggerBadgeItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  actionNavBadge: {
     backgroundColor: '#F0FDFA',
     borderWidth: 1,
     borderColor: '#CCFBF1',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3.5,
+    borderRadius: 8,
   },
-  triggerBadgeText: { fontSize: 12, fontWeight: '600', color: '#0F766E' },
-  sentimentIndexRow: {
+  actionNavBadgeText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#0D9488',
+  },
+  actionNavFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 16,
-    paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
+    borderTopColor: 'rgba(226, 232, 240, 0.7)',
+    paddingTop: 10,
   },
-  sentimentIndexLabel: { fontSize: 12, fontWeight: '600', color: '#64748B' },
-  sentimentIndexValue: { fontSize: 12, fontWeight: '700' },
-  emptyJournalState: { paddingVertical: 10, paddingHorizontal: 4 },
-  emptyJournalStateText: { fontSize: 13, color: '#94A3B8', lineHeight: 19 },
+  actionNavFooterText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#0D9488',
+  },
 });
-
-export default AnalyticsScreen;

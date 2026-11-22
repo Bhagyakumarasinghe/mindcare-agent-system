@@ -28,6 +28,7 @@ import MeditationScreen from '../screens/MeditationScreen';
 import WeeklyReportScreen from '../screens/WeeklyReportScreen';
 import EditProfileScreen from '../screens/EditProfile';
 import AplusTrackScreen from '../screens/AplusTrackScreen';
+import ActivityProgressScreen from '../screens/ActivityProgressScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -127,6 +128,8 @@ export default function AppNavigator() {
       <Stack.Screen name="WeeklyReport" component={WeeklyReportScreen} /> 
       <Stack.Screen name="AplusTrack" component={AplusTrackScreen} /> 
       <Stack.Screen name="AplusTrackScreen" component={AplusTrackScreen} /> 
+      <Stack.Screen name="ActivityProgress" component={ActivityProgressScreen} /> 
+      <Stack.Screen name="ActivityProgressScreen" component={ActivityProgressScreen} /> 
       <Stack.Screen name="SupportSanctuary" component={ChatScreen} /> 
       <Stack.Screen name="SupportSanctuaryScreen" component={ChatScreen} /> 
       

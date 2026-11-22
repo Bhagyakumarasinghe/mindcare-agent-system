@@ -28,6 +28,7 @@ import { useAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { logActivity } from '../api/authService';
+import { recordRelaxSession } from '../utils/activityTracker';
 
 const { width } = Dimensions.get('window');
 
@@ -261,21 +262,41 @@ const MeditationScreen = ({ navigation }) => {
   const logSessionActivity = async (durationSec) => {
     if (durationSec < 10) return;
     try {
-      const userStr = await AsyncStorage.getItem('user');
-      const parsedUser = userStr ? JSON.parse(userStr) : null;
-      const resolvedUserId = parsedUser?.id || 'demo_user';
+      let resolvedUserId = '';
+      try {
+        const cachedProf = await AsyncStorage.getItem('@mindcare_cached_profile');
+        if (cachedProf) {
+          const cp = JSON.parse(cachedProf);
+          resolvedUserId = cp?.id || cp?.user_id || '';
+        }
+      } catch {
+        // ignore
+      }
+      if (!resolvedUserId) {
+        const userStr = await AsyncStorage.getItem('user');
+        const parsedUser = userStr ? JSON.parse(userStr) : null;
+        resolvedUserId = parsedUser?.id || parsedUser?.user_id || 'demo_user';
+      }
+
       const durationMinutes = Math.max(1, Math.round(durationSec / 60));
 
-      await logActivity({
-        user_id: resolvedUserId,
-        activity_type: 'Guided Meditation',
-        duration_minutes: durationMinutes,
-        metadata: {
-          track_name: SOUNDSCAPES[selectedTrackIndex]?.title || 'Ambient Sanctuary',
-          visual_scene: VISUAL_SCENES[activeSceneIndex]?.label,
-          seconds_spent: durationSec,
-        }
-      });
+      // Synchronize live activity counter for relaxation first so it always persists
+      await recordRelaxSession(resolvedUserId, durationMinutes, 'Guided Meditation');
+
+      try {
+        await logActivity({
+          user_id: resolvedUserId && resolvedUserId !== 'demo_user' ? resolvedUserId : undefined,
+          activity_type: 'Guided Meditation',
+          duration_minutes: durationMinutes,
+          metadata: {
+            track_name: SOUNDSCAPES[selectedTrackIndex]?.title || 'Ambient Sanctuary',
+            visual_scene: VISUAL_SCENES[activeSceneIndex]?.label,
+            seconds_spent: durationSec,
+          }
+        });
+      } catch (beErr) {
+        console.warn('Backend meditation activity notice:', beErr?.message || beErr);
+      }
     } catch (err) {
       console.log('Meditation activity logging error:', err?.message || err);
     }

@@ -345,10 +345,6 @@ const MoodTrackingScreen = ({ navigation }) => {
               JSON.stringify(biometricsPayload)
             );
           }
-          await AsyncStorage.setItem(
-            '@mindcare_latest_biometrics',
-            JSON.stringify(biometricsPayload)
-          );
           // Invalidate stale analytics cache so next focus forces fresh server data
           await AsyncStorage.setItem('@mindcare_analytics_cache_stale', Date.now().toString());
           try {

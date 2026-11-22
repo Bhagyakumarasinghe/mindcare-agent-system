@@ -635,8 +635,10 @@ def get_academic_recommendation(user_id: str = Query(..., description="User ID i
         with get_neo4j_session() as session:
             # 1. Fetch user biometrics
             bio_record = session.run("""
-                MERGE (u:User {id: $user_id})
+                OPTIONAL MATCH (u:User)
+                WHERE u.id = $user_id OR u.user_id = $user_id
                 WITH u
+                WHERE u IS NOT NULL
                 OPTIONAL MATCH (u)-[:RECORDED_ASSESSMENT]->(a:StressAssessment)
                 WITH u, a ORDER BY a.timestamp DESC LIMIT 1
                 OPTIONAL MATCH (u)-[:LOGGED_MOOD]->(m:MoodLog)
